@@ -68,6 +68,8 @@ interface ResolvePayload {
 const PRESENCE_TTL_MS = 120_000;
 const CHAT_RATE_LIMIT_MS = 2_000;
 const ROM_MAX_BYTES = 8 * 1024 * 1024;
+const FRAME_MAX_BYTES = 1024 * 1024;
+const STATE_MAX_BYTES = 4 * 1024 * 1024;
 
 export class GameRoomDO extends Container<Env> {
   defaultPort = 8080;
@@ -568,14 +570,14 @@ export class GameRoomDO extends Container<Env> {
   }
 
   private async persistEmulatorArtifacts(frameKey: string, stateKey: string): Promise<void> {
-    const frame = await this.containerFetch("http://container/frame");
-    if (!frame.ok || frame.body === null) throw new Error(`capture frame failed with ${frame.status}`);
-    await this.env.PRIVATE_DATA.put(frameKey, frame.body, {
+    const frameResponse = await this.containerFetch("http://container/frame");
+    const frame = await expectContainerBytes(frameResponse, "capture frame", FRAME_MAX_BYTES);
+    await this.env.PRIVATE_DATA.put(frameKey, frame, {
       httpMetadata: { contentType: "image/png" }
     });
-    const state = await this.containerFetch("http://container/state");
-    if (!state.ok || state.body === null) throw new Error(`save state failed with ${state.status}`);
-    await this.env.PRIVATE_DATA.put(stateKey, state.body, {
+    const stateResponse = await this.containerFetch("http://container/state");
+    const state = await expectContainerBytes(stateResponse, "save state", STATE_MAX_BYTES);
+    await this.env.PRIVATE_DATA.put(stateKey, state, {
       httpMetadata: { contentType: "application/octet-stream" }
     });
   }
@@ -660,4 +662,22 @@ async function expectContainerJson(response: Response, action: string): Promise<
   };
   if (!response.ok) throw new Error(`${action} failed: ${body.error ?? response.status}`);
   return body;
+}
+
+async function expectContainerBytes(
+  response: Response,
+  action: string,
+  maxBytes: number
+): Promise<Uint8Array> {
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({ error: "invalid emulator response" }))) as {
+      error?: string;
+    };
+    throw new Error(`${action} failed: ${body.error ?? response.status}`);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength < 1 || bytes.byteLength > maxBytes) {
+    throw new Error(`${action} returned an invalid size`);
+  }
+  return bytes;
 }
