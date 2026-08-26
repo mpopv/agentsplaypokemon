@@ -230,7 +230,7 @@ export class GameRoomDO extends Container<Env> {
     const response = await this.containerFetch("http://container/load", {
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
-      body: await object.arrayBuffer()
+      body: new Uint8Array(await object.arrayBuffer())
     });
     await expectContainerJson(response, "load ROM");
     const stateKey = `game/${roomId}/state.bin`;
@@ -551,7 +551,7 @@ export class GameRoomDO extends Container<Env> {
     const loadResponse = await this.containerFetch("http://container/load", {
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
-      body: await rom.arrayBuffer()
+      body: new Uint8Array(await rom.arrayBuffer())
     });
     await expectContainerJson(loadResponse, "reload ROM");
     if (meta.state_key) {
@@ -560,7 +560,7 @@ export class GameRoomDO extends Container<Env> {
         const restoreResponse = await this.containerFetch("http://container/load-state", {
           method: "POST",
           headers: { "content-type": "application/octet-stream" },
-          body: await state.arrayBuffer()
+          body: new Uint8Array(await state.arrayBuffer())
         });
         await expectContainerJson(restoreResponse, "restore emulator state");
       }
