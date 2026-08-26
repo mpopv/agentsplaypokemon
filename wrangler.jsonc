@@ -49,7 +49,8 @@
   },
   "r2_buckets": [
     {
-      "binding": "PRIVATE_DATA"
+      "binding": "PRIVATE_DATA",
+      "bucket_name": "agents-play-pokemon-private-data"
     }
   ],
   "migrations": [

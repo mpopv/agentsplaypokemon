@@ -23,13 +23,20 @@ timeout --signal=TERM --kill-after=1s "${timeout_seconds}s" \
     --unshare-pid \
     --unshare-user \
     --unshare-uts \
-    --ro-bind / / \
+    --tmpfs / \
+    --ro-bind /usr /usr \
+    --ro-bind /etc /etc \
+    --symlink usr/bin /bin \
+    --symlink usr/sbin /sbin \
+    --symlink usr/lib /lib \
+    --symlink usr/lib64 /lib64 \
     --bind /workspace /workspace \
-    --tmpfs /proc \
+    --proc /proc \
     --dev /dev \
     --tmpfs /tmp \
+    --dir /var \
     --tmpfs /var/tmp \
-    --tmpfs /run/lock \
+    --tmpfs /run \
     --tmpfs /dev/shm \
     --cap-drop ALL \
     --uid 10001 \
