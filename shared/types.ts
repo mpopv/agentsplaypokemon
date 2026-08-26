@@ -1,0 +1,138 @@
+export const GAME_INPUTS = [
+  "up",
+  "down",
+  "left",
+  "right",
+  "a",
+  "b",
+  "start",
+  "select"
+] as const;
+
+export type GameInput = (typeof GAME_INPUTS)[number];
+
+export interface AgentIdentity {
+  agentId: string;
+  displayName: string;
+}
+
+export interface SessionInfo extends AgentIdentity {
+  roomId: string;
+}
+
+export interface VoteTally {
+  input: GameInput;
+  count: number;
+}
+
+export interface VoteWindow {
+  id: number;
+  startsAt: number;
+  endsAt: number;
+  status: "open" | "resolved";
+  winner: GameInput | null;
+}
+
+export interface GameEvent {
+  sequence: number;
+  eventType: string;
+  data: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface ChatMessage {
+  sequence: number;
+  agentId: string;
+  displayName: string;
+  message: string;
+  createdAt: number;
+}
+
+export interface GameObservation {
+  roomId: string;
+  mode: "demo" | "rom";
+  frameRevision: number;
+  frameUrl: string;
+  activeAgents: number;
+  voteWindow: VoteWindow;
+  votes: VoteTally[];
+  yourVote: GameInput | null;
+  lastInput: GameInput | null;
+  events: GameEvent[];
+}
+
+export interface ComputerExecRequest {
+  command: string;
+  cwd?: string;
+}
+
+export interface ComputerExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  filesystemRevision: number;
+}
+
+export interface ComputerEvent {
+  sequence: number;
+  agentId: string;
+  displayName: string;
+  eventType: string;
+  command: string | null;
+  exitCode: number | null;
+  stdoutPreview: string | null;
+  stderrPreview: string | null;
+  filesystemRevision: number;
+  createdAt: number;
+}
+
+export interface ComputerTreeEntry {
+  name: string;
+  path: string;
+  size: number;
+  mtime: number;
+  type: "file" | "directory" | "symlink";
+}
+
+export interface ComputerFileView {
+  path: string;
+  size: number;
+  mtime: number;
+  mode: number;
+  encoding: "utf8" | "base64";
+  content: string;
+  truncated: boolean;
+}
+
+export interface ComputerFileHistoryEntry {
+  sequence: number;
+  path: string;
+  operation: "created" | "updated" | "deleted";
+  size: number;
+  mtime: number;
+  filesystemRevision: number;
+  preview: string | null;
+  createdAt: number;
+}
+
+export interface ComputerOverview {
+  roomId: string;
+  filesystemRevision: number;
+  events: ComputerEvent[];
+}
+
+export interface ComputerSnapshot {
+  snapshotId: string;
+  filesystemRevision: number;
+  fileCount: number;
+  totalBytes: number;
+  createdAt: number;
+}
+
+export interface SocketEnvelope<T = unknown> {
+  source: "game" | "computer";
+  type: string;
+  payload: T;
+  createdAt: number;
+}

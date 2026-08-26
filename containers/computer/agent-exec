@@ -1,0 +1,58 @@
+#!/bin/bash
+set -uo pipefail
+
+readonly command_text="${1:?command is required}"
+readonly exec_dir="$(mktemp -d /tmp/agent-exec.XXXXXX)"
+readonly agent_cwd="${PWD}"
+readonly byte_limit="${COMPUTER_OUTPUT_LIMIT_BYTES:-65536}"
+readonly timeout_seconds="${COMPUTER_EXEC_TIMEOUT_SECONDS:-4}"
+
+cleanup() {
+  pkill -KILL -u 10001 >/dev/null 2>&1 || true
+  rm -rf -- "${exec_dir}"
+}
+trap cleanup EXIT HUP INT TERM
+
+set +e
+timeout --signal=TERM --kill-after=1s "${timeout_seconds}s" \
+  bwrap \
+    --die-with-parent \
+    --new-session \
+    --unshare-ipc \
+    --unshare-net \
+    --unshare-pid \
+    --unshare-user \
+    --unshare-uts \
+    --ro-bind / / \
+    --bind /workspace /workspace \
+    --tmpfs /proc \
+    --dev /dev \
+    --tmpfs /tmp \
+    --tmpfs /var/tmp \
+    --tmpfs /run/lock \
+    --tmpfs /dev/shm \
+    --cap-drop ALL \
+    --uid 10001 \
+    --gid 10001 \
+    --clearenv \
+    --setenv HOME /tmp \
+    --setenv LANG C.UTF-8 \
+    --setenv PATH /usr/local/bin:/usr/bin:/bin \
+    --setenv TERM dumb \
+    --chdir "${agent_cwd}" \
+    bash --noprofile --norc -lc "${command_text}" \
+  >"${exec_dir}/stdout" 2>"${exec_dir}/stderr"
+exit_code=$?
+set -e
+
+head -c "${byte_limit}" "${exec_dir}/stdout"
+if [ "$(wc -c < "${exec_dir}/stdout")" -gt "${byte_limit}" ]; then
+  printf '\n[stdout truncated at %s bytes]\n' "${byte_limit}"
+fi
+
+head -c "${byte_limit}" "${exec_dir}/stderr" >&2
+if [ "$(wc -c < "${exec_dir}/stderr")" -gt "${byte_limit}" ]; then
+  printf '\n[stderr truncated at %s bytes]\n' "${byte_limit}" >&2
+fi
+
+exit "${exit_code}"

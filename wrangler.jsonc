@@ -1,0 +1,83 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agents-play-pokemon",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "agentsplaypokemon.com",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "containers": [
+    {
+      "class_name": "GameRoomDO",
+      "image": "./containers/game/Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 10,
+      "rollout_active_grace_period": 0,
+      "rollout_step_percentage": [100]
+    },
+    {
+      "class_name": "SharedComputerDO",
+      "image": "./containers/computer/Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 10,
+      "rollout_active_grace_period": 0,
+      "rollout_step_percentage": [100]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GAME_ROOMS",
+        "class_name": "GameRoomDO"
+      },
+      {
+        "name": "SHARED_COMPUTERS",
+        "class_name": "SharedComputerDO"
+      }
+    ]
+  },
+  "r2_buckets": [
+    {
+      "binding": "PRIVATE_DATA"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GameRoomDO", "SharedComputerDO"]
+    }
+  ],
+  "vars": {
+    "DEFAULT_ROOM_ID": "main",
+    "VOTE_WINDOW_MS": "10000",
+    "COMPUTER_EXEC_TIMEOUT_MS": "5000",
+    "COMPUTER_OUTPUT_LIMIT_BYTES": "65536",
+    "SNAPSHOT_INTERVAL_MINUTES": "15"
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

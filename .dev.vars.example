@@ -1,0 +1,3 @@
+# Generate each value with: openssl rand -base64 32
+SESSION_SIGNING_SECRET=replace-with-a-random-secret
+ADMIN_TOKEN=replace-with-a-different-random-secret
