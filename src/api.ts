@@ -1,13 +1,19 @@
-import type {
-  ChatMessage,
-  ComputerFileHistoryEntry,
-  ComputerFileView,
-  ComputerOverview,
-  ComputerTreeEntry,
-  GameInput,
-  GameObservation,
-  SessionInfo
+import {
+  AGENT_SESSION_PROTOCOL_PREFIX,
+  type ChatMessage,
+  type ComputerFileHistoryEntry,
+  type ComputerFileView,
+  type ComputerOverview,
+  type ComputerTreeEntry,
+  type GameInput,
+  type GameObservation,
+  type SessionBootstrap,
+  type SessionInfo
 } from "../shared/types";
+
+const TAB_SESSION_STORAGE_KEY = "agents_play_tab_session";
+
+let sessionToken: string | null = null;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -20,11 +26,32 @@ export class ApiError extends Error {
 }
 
 export async function startSession(): Promise<SessionInfo> {
-  return api<SessionInfo>("/api/session", { method: "POST" });
+  sessionToken = readStoredSessionToken();
+  const session = await api<SessionBootstrap>("/api/session", { method: "POST" });
+  sessionToken = session.token;
+  storeSessionToken(session.token);
+  return {
+    agentId: session.agentId,
+    displayName: session.displayName,
+    roomId: session.roomId
+  };
 }
 
 export async function observeGame(roomId: string): Promise<GameObservation> {
   return api<GameObservation>(`/rooms/${encodeURIComponent(roomId)}/game`);
+}
+
+export async function readGameFrame(frameUrl: string): Promise<Blob> {
+  const url = new URL(frameUrl, window.location.origin);
+  if (url.origin !== window.location.origin) {
+    throw new ApiError("frame URL must use the application origin", 400);
+  }
+  const headers = new Headers({ authorization: `Bearer ${requireSessionToken()}` });
+  const response = await fetch(url, { headers, credentials: "omit" });
+  if (!response.ok) {
+    throw new ApiError(`frame request failed with ${response.status}`, response.status);
+  }
+  return response.blob();
 }
 
 export async function submitVote(roomId: string, input: GameInput): Promise<GameObservation> {
@@ -103,6 +130,10 @@ export function gameStreamUrl(roomId: string): string {
   return webSocketUrl(`/rooms/${encodeURIComponent(roomId)}/game-stream`);
 }
 
+export function sessionSocketProtocols(): string[] {
+  return [`${AGENT_SESSION_PROTOCOL_PREFIX}${requireSessionToken()}`];
+}
+
 function webSocketUrl(path: string): string {
   const url = new URL(path, window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -112,10 +143,11 @@ function webSocketUrl(path: string): string {
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined) headers.set("content-type", "application/json");
+  if (sessionToken !== null) headers.set("authorization", `Bearer ${sessionToken}`);
   const response = await fetch(path, {
     ...init,
     headers,
-    credentials: "same-origin"
+    credentials: "omit"
   });
   const text = await response.text();
   let value: unknown = null;
@@ -134,4 +166,25 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(message, response.status);
   }
   return value as T;
+}
+
+function readStoredSessionToken(): string | null {
+  try {
+    return window.sessionStorage.getItem(TAB_SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeSessionToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(TAB_SESSION_STORAGE_KEY, token);
+  } catch {
+    // The current page can still use its in-memory token.
+  }
+}
+
+function requireSessionToken(): string {
+  if (sessionToken === null) throw new Error("the agent session is not ready");
+  return sessionToken;
 }

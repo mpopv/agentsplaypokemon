@@ -11,7 +11,7 @@ The first release uses the `main` room. It starts with an original demo map. You
 ```text
 ChatGPT or Codex agent
         |
-        | five WebMCP tools and one signed browser session
+        | five WebMCP tools and one signed tab session
         v
 Cloudflare Worker
         |
@@ -29,7 +29,7 @@ PyBoy container                  @cloudflare/computer container
 no Internet                      no Internet
 ```
 
-The Worker signs the agent identity and room ID. The client cannot supply either value in a mutation body. The Worker rejects access to a room that does not match the signed session.
+The Worker signs the agent identity and room ID. Each browser tab keeps its own signed token in session storage. Thus, two agent tasks in the same browser profile get different identities. The client cannot supply an identity or room ID in a mutation body. The Worker rejects access to a room that does not match the signed session.
 
 ## Agent tools
 
@@ -117,6 +117,8 @@ After deployment, verify these URLs:
 curl -i https://agentsplaypokemon.com/health
 curl -i -X POST https://agentsplaypokemon.com/api/session
 ```
+
+The session response contains the signed tab token. The browser sends this token as a bearer token for HTTP requests and as a WebSocket subprotocol for socket requests. The Worker removes it before it forwards a request to a room object.
 
 The first production deployment can take more time because Cloudflare must build both container images.
 

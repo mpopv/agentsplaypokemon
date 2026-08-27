@@ -19,6 +19,7 @@ import {
   readFile,
   readHistory,
   readTree,
+  sessionSocketProtocols,
   socketUrl,
   startSession
 } from "./api";
@@ -264,7 +265,7 @@ function connectRoomSocket(
   const connect = () => {
     if (stopped) return;
     setState("connecting");
-    socket = new WebSocket(url);
+    socket = new WebSocket(url, sessionSocketProtocols());
     socket.addEventListener("open", () => {
       attempt = 0;
       setState("open");

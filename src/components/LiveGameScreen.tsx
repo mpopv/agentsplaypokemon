@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { gameStreamUrl } from "../api";
+import { gameStreamUrl, readGameFrame, sessionSocketProtocols } from "../api";
 
 type StreamState = "checkpoint" | "connecting" | "live" | "retrying";
 
@@ -14,9 +14,29 @@ interface LiveGameScreenProps {
 export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenProps) {
   const enabled = mode === "rom";
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [checkpointUrl, setCheckpointUrl] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<StreamState>(
     enabled ? "connecting" : "checkpoint"
   );
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | undefined;
+    setCheckpointUrl(null);
+    void readGameFrame(frameUrl)
+      .then((frame) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(frame);
+        setCheckpointUrl(objectUrl);
+      })
+      .catch(() => {
+        if (active) setCheckpointUrl(null);
+      });
+    return () => {
+      active = false;
+      if (objectUrl !== undefined) URL.revokeObjectURL(objectUrl);
+    };
+  }, [frameUrl]);
 
   useEffect(() => {
     if (!enabled) {
@@ -84,7 +104,7 @@ export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenPr
       setStreamState(attempt === 0 ? "connecting" : "retrying");
       displayingLiveFrame = false;
       const generation = ++connectionGeneration;
-      const nextSocket = new WebSocket(gameStreamUrl(roomId));
+      const nextSocket = new WebSocket(gameStreamUrl(roomId), sessionSocketProtocols());
       socket = nextSocket;
       nextSocket.binaryType = "arraybuffer";
       nextSocket.addEventListener("open", () => {
@@ -121,7 +141,9 @@ export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenPr
   const live = streamState === "live";
   return (
     <div className="game-screen-media" data-stream-state={streamState}>
-      <img className="game-screen game-frame-fallback" src={frameUrl} alt={alt} />
+      {checkpointUrl !== null ? (
+        <img className="game-screen game-frame-fallback" src={checkpointUrl} alt={alt} />
+      ) : null}
       <div className={`game-stream-layer${live ? " is-live" : ""}`} aria-hidden="true">
         <canvas
           ref={canvasRef}

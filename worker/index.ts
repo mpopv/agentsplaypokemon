@@ -41,7 +41,7 @@ app.use("*", async (context, next) => {
   context.header("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   context.header(
     "content-security-policy",
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
       "connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
       "form-action 'self'; frame-ancestors 'none'"
   );
@@ -57,8 +57,7 @@ app.get("/health", (context) =>
 app.post("/api/session", async (context) => {
   enforceSameOrigin(context.req.raw);
   const result = await createSession(context.req.raw, context.env);
-  if (result.setCookie) context.header("set-cookie", result.setCookie);
-  return context.json(publicSession(result.session));
+  return context.json({ ...publicSession(result.session), token: result.token });
 });
 
 app.use("/rooms/:roomId/*", async (context, next) => {
@@ -328,11 +327,28 @@ async function forwardSocket(
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw new InputError("websocket upgrade required", 426);
   }
+  const selectedProtocol = request.headers.get("sec-websocket-protocol");
+  if (selectedProtocol === null) {
+    throw new InputError("websocket session protocol required", 401);
+  }
   const headers = new Headers(request.headers);
+  headers.delete("authorization");
+  headers.delete("cookie");
+  headers.delete("sec-websocket-protocol");
   headers.set("x-agent-id", agent.agentId);
   headers.set("x-agent-name", agent.displayName);
   headers.set("x-room-id", roomId);
-  return stub.fetch(new Request(`https://internal${path}`, { method: "GET", headers }));
+  const response = await stub.fetch(
+    new Request(`https://internal${path}`, { method: "GET", headers })
+  );
+  if (response.status !== 101 || response.webSocket === null) return response;
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.set("sec-websocket-protocol", selectedProtocol);
+  return new Response(null, {
+    status: 101,
+    headers: responseHeaders,
+    webSocket: response.webSocket
+  });
 }
 
 async function optionalJsonObject(request: Request): Promise<Record<string, unknown>> {

@@ -11,6 +11,8 @@ export const GAME_INPUTS = [
 
 export type GameInput = (typeof GAME_INPUTS)[number];
 
+export const AGENT_SESSION_PROTOCOL_PREFIX = "agents-play-session.";
+
 export interface AgentIdentity {
   agentId: string;
   displayName: string;
@@ -18,6 +20,10 @@ export interface AgentIdentity {
 
 export interface SessionInfo extends AgentIdentity {
   roomId: string;
+}
+
+export interface SessionBootstrap extends SessionInfo {
+  token: string;
 }
 
 export interface VoteTally {

@@ -1,9 +1,13 @@
-import type { AgentIdentity, SessionInfo } from "../../shared/types";
+import {
+  AGENT_SESSION_PROTOCOL_PREFIX,
+  type AgentIdentity,
+  type SessionInfo
+} from "../../shared/types";
 import type { RuntimeEnv } from "./runtime-env";
 import { InputError, parseRoomId } from "./validation";
 
-const COOKIE_NAME = "agents_play_session";
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const MAX_TOKEN_LENGTH = 2_048;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -14,31 +18,30 @@ interface SessionPayload extends AgentIdentity {
 
 export interface SessionResult {
   session: SessionPayload;
-  setCookie?: string;
+  token: string;
 }
 
 export async function createSession(request: Request, env: RuntimeEnv): Promise<SessionResult> {
-  const existing = await readSession(request, env);
-  if (existing !== null) return { session: existing };
+  const existingToken = readSessionToken(request);
+  if (existingToken !== null) {
+    const existing = await verifySessionToken(existingToken, env);
+    if (existing !== null) return { session: existing, token: existingToken };
+  }
 
   const agentId = crypto.randomUUID();
   const session: SessionPayload = {
     agentId,
-    displayName: `Agent-${agentId.slice(0, 4).toUpperCase()}`,
+    displayName: `Agent-${agentId.slice(0, 8).toUpperCase()}`,
     roomId: parseRoomId(env.DEFAULT_ROOM_ID),
     issuedAt: Date.now()
   };
   const token = await signSession(session, requireSecret(env.SESSION_SIGNING_SECRET));
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return {
-    session,
-    setCookie: `${COOKIE_NAME}=${token}; Path=/; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly; SameSite=Strict${secure}`
-  };
+  return { session, token };
 }
 
 export async function requireSession(request: Request, env: RuntimeEnv): Promise<SessionPayload> {
   const session = await readSession(request, env);
-  if (session === null) throw new InputError("a signed browser session is required", 401);
+  if (session === null) throw new InputError("a signed tab session is required", 401);
   return session;
 }
 
@@ -57,8 +60,15 @@ export async function authorizeAdmin(request: Request, env: RuntimeEnv): Promise
 }
 
 async function readSession(request: Request, env: RuntimeEnv): Promise<SessionPayload | null> {
-  const token = readCookie(request.headers.get("cookie"), COOKIE_NAME);
+  const token = readSessionToken(request);
   if (token === null) return null;
+  return verifySessionToken(token, env);
+}
+
+async function verifySessionToken(
+  token: string,
+  env: RuntimeEnv
+): Promise<SessionPayload | null> {
   const secret = env.SESSION_SIGNING_SECRET;
   if (!secret) throw new InputError("SESSION_SIGNING_SECRET is not configured", 503);
   const [payloadPart, signaturePart, extra] = token.split(".");
@@ -123,13 +133,21 @@ function requireSecret(value: string | undefined): string {
   return value;
 }
 
-function readCookie(header: string | null, name: string): string | null {
-  if (header === null) return null;
-  for (const part of header.split(";")) {
-    const [key, ...rest] = part.trim().split("=");
-    if (key === name) return rest.join("=");
+function readSessionToken(request: Request): string | null {
+  const authorization = request.headers.get("authorization");
+  if (authorization !== null) {
+    const match = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(authorization);
+    return match?.[1] && match[1].length <= MAX_TOKEN_LENGTH ? match[1] : null;
   }
-  return null;
+
+  const protocols = request.headers.get("sec-websocket-protocol");
+  if (protocols === null || protocols.length > MAX_TOKEN_LENGTH * 2) return null;
+  const protocol = protocols.trim();
+  if (!protocol.startsWith(AGENT_SESSION_PROTOCOL_PREFIX)) return null;
+  const token = protocol.slice(AGENT_SESSION_PROTOCOL_PREFIX.length);
+  return token.length <= MAX_TOKEN_LENGTH && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)
+    ? token
+    : null;
 }
 
 function toBase64Url(bytes: Uint8Array): string {
