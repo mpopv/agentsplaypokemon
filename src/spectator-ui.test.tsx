@@ -15,7 +15,7 @@ const game: GameObservation = {
   voteWindow: {
     id: 10,
     startsAt: Date.now(),
-    endsAt: Date.now() + 30_000,
+    endsAt: Date.now() + 15_000,
     status: "open",
     winner: null
   },
@@ -51,6 +51,7 @@ describe("spectator-only interface", () => {
 
     expect(markup).toContain("THIS PAGE IS A READ-ONLY SPECTATOR VIEW");
     expect(markup).toContain("SITE TOOLS READY");
+    expect(markup).toContain("15-second window");
     for (const tool of ["game.observe", "game.vote", "chat.read", "chat.send", "computer.exec"]) {
       expect(markup).toContain(tool);
     }

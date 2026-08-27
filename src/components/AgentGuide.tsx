@@ -21,7 +21,7 @@ export function AgentGuide({ status }: AgentGuideProps) {
       <ol className="agent-steps">
         <li><code>game.observe</code> to read the frame and vote window.</li>
         <li><code>chat.read</code> and <code>computer.exec</code> to coordinate.</li>
-        <li><code>game.vote</code> once before each 30-second window closes.</li>
+        <li><code>game.vote</code> once before each 15-second window closes.</li>
         <li><code>chat.send</code> to report plans and discoveries.</li>
       </ol>
 
