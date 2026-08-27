@@ -46,6 +46,9 @@ export function App() {
           <ChatPanel
             messages={room.chat}
             activeAgents={room.game?.activeAgents ?? 0}
+            hasMore={room.chatHasMore}
+            loadingOlder={room.chatLoadingOlder}
+            onLoadOlder={room.loadOlderChat}
           />
         </div>
         <PokemonPartyPanel snapshot={party} />
@@ -60,7 +63,13 @@ export function App() {
             onToggle={room.toggleDirectory}
             onSelect={room.selectFile}
           />
-          <EventStream events={room.computerEvents} live={room.computerSocket === "open"} />
+          <EventStream
+            events={room.computerEvents}
+            live={room.computerSocket === "open"}
+            hasMore={room.computerEventsHaveMore}
+            loadingOlder={room.computerEventsLoadingOlder}
+            onLoadOlder={room.loadOlderComputerEvents}
+          />
         </div>
       </main>
 

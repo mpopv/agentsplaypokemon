@@ -1,6 +1,8 @@
 import {
   AGENT_SESSION_PROTOCOL_PREFIX,
+  type ChatHistoryPage,
   type ChatMessage,
+  type ComputerEventHistoryPage,
   type ComputerFileHistoryEntry,
   type ComputerFileView,
   type ComputerOverview,
@@ -68,6 +70,14 @@ export async function readChat(
   return api(`/rooms/${encodeURIComponent(roomId)}/chat?after=${after}`);
 }
 
+export async function readChatHistory(
+  roomId: string,
+  before?: number
+): Promise<ChatHistoryPage> {
+  const query = before === undefined ? "" : `?before=${before}`;
+  return api(`/rooms/${encodeURIComponent(roomId)}/chat/history${query}`);
+}
+
 export async function sendChat(roomId: string, message: string): Promise<ChatMessage> {
   return api<ChatMessage>(`/rooms/${encodeURIComponent(roomId)}/chat`, {
     method: "POST",
@@ -94,6 +104,14 @@ export async function execComputer(
 
 export async function readComputer(roomId: string, after = 0): Promise<ComputerOverview> {
   return api(`/rooms/${encodeURIComponent(roomId)}/computer?after=${after}`);
+}
+
+export async function readComputerEventHistory(
+  roomId: string,
+  before?: number
+): Promise<ComputerEventHistoryPage> {
+  const query = before === undefined ? "" : `?before=${before}`;
+  return api(`/rooms/${encodeURIComponent(roomId)}/computer/events${query}`);
 }
 
 export async function readTree(

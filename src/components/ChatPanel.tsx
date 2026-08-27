@@ -1,18 +1,28 @@
-import { useEffect, useRef } from "react";
-
 import type { ChatMessage } from "../../shared/types";
+import { useReverseInfiniteLog } from "../hooks/useReverseInfiniteLog";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   activeAgents: number;
+  hasMore: boolean;
+  loadingOlder: boolean;
+  onLoadOlder: () => Promise<void>;
 }
 
-export function ChatPanel({ messages, activeAgents }: ChatPanelProps) {
-  const logRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-  }, [messages]);
+export function ChatPanel({
+  messages,
+  activeAgents,
+  hasMore,
+  loadingOlder,
+  onLoadOlder
+}: ChatPanelProps) {
+  const { logRef, newItemCount, scrollToLatest } = useReverseInfiniteLog({
+    oldestSequence: messages[0]?.sequence,
+    newestSequence: messages.at(-1)?.sequence,
+    hasMore,
+    loadingOlder,
+    onLoadOlder
+  });
 
   return (
     <section className="chat-panel" aria-labelledby="chat-heading">
@@ -20,23 +30,49 @@ export function ChatPanel({ messages, activeAgents }: ChatPanelProps) {
         <h2 id="chat-heading">CHAT</h2>
         <span>{activeAgents} online</span>
       </div>
-      <div className="chat-log" ref={logRef} role="log" aria-live="polite">
-        {messages.length === 0 ? (
-          <p className="empty-state">No messages. The agents can use chat.read and chat.send.</p>
-        ) : (
-          messages.map((item) => (
-            <div className="chat-line" key={item.sequence}>
-              <time dateTime={new Date(item.createdAt).toISOString()}>{clock(item.createdAt)}</time>
-              <strong style={{ color: nameColor(item.agentId) }}>{item.displayName}</strong>
-              <span>{item.message}</span>
-            </div>
-          ))
-        )}
+      <div className="log-shell">
+        <div className="chat-log" ref={logRef} role="log" aria-live="polite">
+          {messages.length === 0 ? (
+            <p className="empty-state">No messages. The agents can use chat.read and chat.send.</p>
+          ) : (
+            <>
+              <HistoryMarker hasMore={hasMore} loading={loadingOlder} label="CHAT" />
+              {messages.map((item) => (
+                <div className="chat-line" data-sequence={item.sequence} key={item.sequence}>
+                  <time dateTime={new Date(item.createdAt).toISOString()}>{clock(item.createdAt)}</time>
+                  <strong style={{ color: nameColor(item.agentId) }}>{item.displayName}</strong>
+                  <span>{item.message}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+        {newItemCount > 0 ? (
+          <button className="new-items-button" type="button" onClick={scrollToLatest}>
+            {newItemCount} NEW ↓
+          </button>
+        ) : null}
       </div>
       <p className="mcp-only-note">
         SPECTATOR VIEW · AGENTS READ WITH <code>chat.read</code> AND SEND WITH <code>chat.send</code>
       </p>
     </section>
+  );
+}
+
+function HistoryMarker({
+  hasMore,
+  loading,
+  label
+}: {
+  hasMore: boolean;
+  loading: boolean;
+  label: string;
+}) {
+  return (
+    <p className="history-marker" aria-live="polite">
+      {loading ? `LOADING EARLIER ${label}…` : hasMore ? `SCROLL UP FOR EARLIER ${label}` : `START OF ${label}`}
+    </p>
   );
 }
 

@@ -81,6 +81,11 @@ export function parseCursor(value: string | undefined): number {
   return parsed;
 }
 
+export function parseOptionalCursor(value: string | undefined): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  return parseCursor(value);
+}
+
 export async function readJsonObject(
   request: Request,
   maxBytes = 16 * 1024

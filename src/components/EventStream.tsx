@@ -1,17 +1,28 @@
-import { useEffect, useRef } from "react";
-
 import type { ComputerEvent } from "../../shared/types";
+import { useReverseInfiniteLog } from "../hooks/useReverseInfiniteLog";
 
 interface EventStreamProps {
   events: ComputerEvent[];
   live: boolean;
+  hasMore: boolean;
+  loadingOlder: boolean;
+  onLoadOlder: () => Promise<void>;
 }
 
-export function EventStream({ events, live }: EventStreamProps) {
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-  }, [events]);
+export function EventStream({
+  events,
+  live,
+  hasMore,
+  loadingOlder,
+  onLoadOlder
+}: EventStreamProps) {
+  const { logRef, newItemCount, scrollToLatest } = useReverseInfiniteLog({
+    oldestSequence: events[0]?.sequence,
+    newestSequence: events.at(-1)?.sequence,
+    hasMore,
+    loadingOlder,
+    onLoadOlder
+  });
 
   return (
     <section className="event-panel" aria-labelledby="events-heading">
@@ -21,24 +32,44 @@ export function EventStream({ events, live }: EventStreamProps) {
           {live ? "LIVE ●" : "RECONNECTING"}
         </span>
       </div>
-      <div className="event-log" ref={logRef} role="log" aria-live="polite">
-        {events.length === 0 ? (
-          <p className="empty-state">No commands yet. Agent commands will appear here.</p>
-        ) : (
-          events.map((event) => (
-            <article className={`computer-event ${event.exitCode === 0 ? "is-ok" : "is-error"}`} key={event.sequence}>
-              <span className="event-mark" aria-hidden="true" />
-              <time dateTime={new Date(event.createdAt).toISOString()}>{preciseClock(event.createdAt)}</time>
-              <strong>{event.displayName}</strong>
-              <div className="event-body">
-                <code>{event.command ?? event.eventType}</code>
-                {event.stdoutPreview ? <pre>{event.stdoutPreview}</pre> : null}
-                {event.stderrPreview ? <pre className="stderr">{event.stderrPreview}</pre> : null}
-              </div>
-              <span className="event-rev">#{event.filesystemRevision}</span>
-            </article>
-          ))
-        )}
+      <div className="log-shell">
+        <div className="event-log" ref={logRef} role="log" aria-live="polite">
+          {events.length === 0 ? (
+            <p className="empty-state">No commands yet. Agent commands will appear here.</p>
+          ) : (
+            <>
+              <p className="history-marker" aria-live="polite">
+                {loadingOlder
+                  ? "LOADING EARLIER EVENTS…"
+                  : hasMore
+                    ? "SCROLL UP FOR EARLIER EVENTS"
+                    : "START OF COMPUTER EVENTS"}
+              </p>
+              {events.map((event) => (
+                <article
+                  className={`computer-event ${event.exitCode === 0 ? "is-ok" : "is-error"}`}
+                  data-sequence={event.sequence}
+                  key={event.sequence}
+                >
+                  <span className="event-mark" aria-hidden="true" />
+                  <time dateTime={new Date(event.createdAt).toISOString()}>{preciseClock(event.createdAt)}</time>
+                  <strong>{event.displayName}</strong>
+                  <div className="event-body">
+                    <code>{event.command ?? event.eventType}</code>
+                    {event.stdoutPreview ? <pre>{event.stdoutPreview}</pre> : null}
+                    {event.stderrPreview ? <pre className="stderr">{event.stderrPreview}</pre> : null}
+                  </div>
+                  <span className="event-rev">#{event.filesystemRevision}</span>
+                </article>
+              ))}
+            </>
+          )}
+        </div>
+        {newItemCount > 0 ? (
+          <button className="new-items-button" type="button" onClick={scrollToLatest}>
+            {newItemCount} NEW ↓
+          </button>
+        ) : null}
       </div>
     </section>
   );

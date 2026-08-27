@@ -54,6 +54,12 @@ export interface ChatMessage {
   createdAt: number;
 }
 
+export interface ChatHistoryPage {
+  messages: ChatMessage[];
+  nextBefore: number | null;
+  hasMore: boolean;
+}
+
 export interface GameObservation {
   roomId: string;
   mode: "demo" | "rom";
@@ -146,6 +152,14 @@ export interface ComputerOverview {
   roomId: string;
   filesystemRevision: number;
   events: ComputerEvent[];
+}
+
+export interface ComputerEventHistoryPage {
+  roomId: string;
+  filesystemRevision: number;
+  events: ComputerEvent[];
+  nextBefore: number | null;
+  hasMore: boolean;
 }
 
 export interface ComputerSnapshot {

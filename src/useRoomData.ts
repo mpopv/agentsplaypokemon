@@ -15,7 +15,9 @@ import {
   ApiError,
   observeGame,
   readChat,
+  readChatHistory,
   readComputer,
+  readComputerEventHistory,
   readFile,
   readHistory,
   readTree,
@@ -23,6 +25,7 @@ import {
   socketUrl,
   startSession
 } from "./api";
+import { mergeBySequence } from "./lib/sequence";
 import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
 type ConnectionState = "connecting" | "open" | "closed";
@@ -33,8 +36,12 @@ export function useRoomData() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [game, setGame] = useState<GameObservation | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [chatHasMore, setChatHasMore] = useState(false);
+  const [chatLoadingOlder, setChatLoadingOlder] = useState(false);
   const [computer, setComputer] = useState<ComputerOverview | null>(null);
   const [computerEvents, setComputerEvents] = useState<ComputerEvent[]>([]);
+  const [computerEventsHaveMore, setComputerEventsHaveMore] = useState(false);
+  const [computerEventsLoadingOlder, setComputerEventsLoadingOlder] = useState(false);
   const [treeByPath, setTreeByPath] = useState<Record<string, ComputerTreeEntry[]>>({});
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
     () => new Set(["/workspace"])
@@ -47,8 +54,16 @@ export function useRoomData() {
   const [webMcpStatus, setWebMcpStatus] = useState<WebMcpStatus>("registering");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const chatCursor = useRef(0);
-  const computerCursor = useRef(0);
+  const chatNewestCursor = useRef(0);
+  const chatNextBefore = useRef<number | null>(null);
+  const chatReady = useRef(false);
+  const chatInitialRequest = useRef<Promise<void> | null>(null);
+  const chatOlderRequest = useRef(false);
+  const computerNewestCursor = useRef(0);
+  const computerNextBefore = useRef<number | null>(null);
+  const computerReady = useRef(false);
+  const computerInitialRequest = useRef<Promise<void> | null>(null);
+  const computerOlderRequest = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -78,32 +93,136 @@ export function useRoomData() {
     }
   }, [session]);
 
+  const loadInitialChat = useCallback((): Promise<void> => {
+    if (!session || chatReady.current) return Promise.resolve();
+    if (chatInitialRequest.current) return chatInitialRequest.current;
+    const request = (async () => {
+      try {
+        const response = await readChatHistory(session.roomId);
+        chatNextBefore.current = response.nextBefore;
+        chatNewestCursor.current = Math.max(
+          chatNewestCursor.current,
+          response.messages.at(-1)?.sequence ?? 0
+        );
+        setChatHasMore(response.hasMore);
+        setChat((current) => mergeBySequence(current, response.messages));
+        chatReady.current = true;
+      } catch (cause) {
+        reportNonAuthError(cause, setError);
+      } finally {
+        chatInitialRequest.current = null;
+      }
+    })();
+    chatInitialRequest.current = request;
+    return request;
+  }, [session]);
+
+  const loadInitialComputerEvents = useCallback((): Promise<void> => {
+    if (!session || computerReady.current) return Promise.resolve();
+    if (computerInitialRequest.current) return computerInitialRequest.current;
+    const request = (async () => {
+      try {
+        const response = await readComputerEventHistory(session.roomId);
+        computerNextBefore.current = response.nextBefore;
+        computerNewestCursor.current = Math.max(
+          computerNewestCursor.current,
+          response.events.at(-1)?.sequence ?? 0
+        );
+        setComputerEventsHaveMore(response.hasMore);
+        setComputerEvents((current) => mergeBySequence(current, response.events));
+        setComputer({
+          roomId: response.roomId,
+          filesystemRevision: response.filesystemRevision,
+          events: response.events
+        });
+        computerReady.current = true;
+      } catch (cause) {
+        reportNonAuthError(cause, setError);
+      } finally {
+        computerInitialRequest.current = null;
+      }
+    })();
+    computerInitialRequest.current = request;
+    return request;
+  }, [session]);
+
   const refreshChat = useCallback(async () => {
     if (!session) return;
+    if (!chatReady.current) {
+      await loadInitialChat();
+      return;
+    }
     try {
-      const response = await readChat(session.roomId, chatCursor.current);
-      chatCursor.current = response.cursor;
-      if (response.messages.length > 0) {
-        setChat((current) => appendUnique(current, response.messages, (item) => item.sequence, 160));
-      }
+      const response = await readChat(session.roomId, chatNewestCursor.current);
+      chatNewestCursor.current = Math.max(chatNewestCursor.current, response.cursor);
+      setChat((current) => mergeBySequence(current, response.messages));
     } catch (cause) {
       reportNonAuthError(cause, setError);
     }
-  }, [session]);
+  }, [loadInitialChat, session]);
 
   const refreshComputer = useCallback(async () => {
     if (!session) return;
+    if (!computerReady.current) {
+      await loadInitialComputerEvents();
+      return;
+    }
     try {
-      const response = await readComputer(session.roomId, computerCursor.current);
+      const response = await readComputer(session.roomId, computerNewestCursor.current);
       setComputer(response);
-      computerCursor.current = response.events.at(-1)?.sequence ?? computerCursor.current;
-      if (response.events.length > 0) {
-        setComputerEvents((current) =>
-          appendUnique(current, response.events, (item) => item.sequence, 120)
-        );
-      }
+      computerNewestCursor.current = Math.max(
+        computerNewestCursor.current,
+        response.events.at(-1)?.sequence ?? 0
+      );
+      setComputerEvents((current) => mergeBySequence(current, response.events));
     } catch (cause) {
       reportNonAuthError(cause, setError);
+    }
+  }, [loadInitialComputerEvents, session]);
+
+  const loadOlderChat = useCallback(async (): Promise<void> => {
+    if (!session || chatOlderRequest.current || chatNextBefore.current === null) return;
+    chatOlderRequest.current = true;
+    setChatLoadingOlder(true);
+    try {
+      const response = await readChatHistory(session.roomId, chatNextBefore.current);
+      chatNextBefore.current = response.nextBefore;
+      setChatHasMore(response.hasMore);
+      setChat((current) => mergeBySequence(current, response.messages));
+    } catch (cause) {
+      reportNonAuthError(cause, setError);
+    } finally {
+      chatOlderRequest.current = false;
+      setChatLoadingOlder(false);
+    }
+  }, [session]);
+
+  const loadOlderComputerEvents = useCallback(async (): Promise<void> => {
+    if (!session || computerOlderRequest.current || computerNextBefore.current === null) return;
+    computerOlderRequest.current = true;
+    setComputerEventsLoadingOlder(true);
+    try {
+      const response = await readComputerEventHistory(
+        session.roomId,
+        computerNextBefore.current
+      );
+      computerNextBefore.current = response.nextBefore;
+      setComputerEventsHaveMore(response.hasMore);
+      setComputerEvents((current) => mergeBySequence(current, response.events));
+      setComputer((current) =>
+        current
+          ? { ...current, filesystemRevision: response.filesystemRevision }
+          : {
+              roomId: response.roomId,
+              filesystemRevision: response.filesystemRevision,
+              events: []
+            }
+      );
+    } catch (cause) {
+      reportNonAuthError(cause, setError);
+    } finally {
+      computerOlderRequest.current = false;
+      setComputerEventsLoadingOlder(false);
     }
   }, [session]);
 
@@ -148,16 +267,31 @@ export function useRoomData() {
 
   useEffect(() => {
     if (!session) return;
-    chatCursor.current = 0;
-    computerCursor.current = 0;
+    chatNewestCursor.current = 0;
+    chatNextBefore.current = null;
+    chatReady.current = false;
+    computerNewestCursor.current = 0;
+    computerNextBefore.current = null;
+    computerReady.current = false;
+    setChat([]);
+    setChatHasMore(false);
+    setComputerEvents([]);
+    setComputerEventsHaveMore(false);
     void Promise.all([
       refreshGame(),
-      refreshChat(),
-      refreshComputer(),
+      loadInitialChat(),
+      loadInitialComputerEvents(),
       loadTree("/workspace"),
       loadSelectedFile()
     ]);
-  }, [loadSelectedFile, loadTree, refreshChat, refreshComputer, refreshGame, session]);
+  }, [
+    loadInitialChat,
+    loadInitialComputerEvents,
+    loadSelectedFile,
+    loadTree,
+    refreshGame,
+    session
+  ]);
 
   useEffect(() => {
     if (!session) return;
@@ -197,8 +331,8 @@ export function useRoomData() {
         if (envelope.source !== "computer") return;
         const event = envelope.payload as ComputerEvent;
         if (typeof event?.sequence !== "number") return;
-        computerCursor.current = Math.max(computerCursor.current, event.sequence);
-        setComputerEvents((current) => appendUnique(current, [event], (item) => item.sequence, 120));
+        computerNewestCursor.current = Math.max(computerNewestCursor.current, event.sequence);
+        setComputerEvents((current) => mergeBySequence(current, [event]));
         setComputer((current) =>
           current ? { ...current, filesystemRevision: event.filesystemRevision } : current
         );
@@ -234,8 +368,12 @@ export function useRoomData() {
     session,
     game,
     chat,
+    chatHasMore,
+    chatLoadingOlder,
     computer,
     computerEvents,
+    computerEventsHaveMore,
+    computerEventsLoadingOlder,
     treeByPath,
     expandedPaths,
     selectedPath,
@@ -246,6 +384,8 @@ export function useRoomData() {
     webMcpStatus,
     error,
     loading,
+    loadOlderChat,
+    loadOlderComputerEvents,
     toggleDirectory,
     selectFile,
     dismissError: () => setError(null)
@@ -292,17 +432,6 @@ function connectRoomSocket(
     if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     socket?.close(1000, "page closed");
   };
-}
-
-function appendUnique<T>(
-  current: T[],
-  incoming: T[],
-  key: (item: T) => number,
-  limit: number
-): T[] {
-  const map = new Map(current.map((item) => [key(item), item]));
-  for (const item of incoming) map.set(key(item), item);
-  return [...map.values()].sort((left, right) => key(left) - key(right)).slice(-limit);
 }
 
 function reportNonAuthError(cause: unknown, setError: (message: string) => void): void {

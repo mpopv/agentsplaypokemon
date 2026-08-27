@@ -7,6 +7,7 @@ import {
   parseCommand,
   parseCursor,
   parseGameInput,
+  parseOptionalCursor,
   parseRoomId,
   parseWorkspacePath,
   readJsonObject
@@ -41,6 +42,8 @@ describe("request validation", () => {
     expect(parseChatMessage("  move north  ")).toBe("move north");
     expect(parseCommand("printf 'ok\\n'")).toBe("printf 'ok\\n'");
     expect(parseCursor("42")).toBe(42);
+    expect(parseOptionalCursor(undefined)).toBeUndefined();
+    expect(parseOptionalCursor("42")).toBe(42);
     expect(() => parseChatMessage(" ")).toThrow(InputError);
     expect(() => parseCommand("\u0000")).toThrow(InputError);
     expect(() => parseCursor("-1")).toThrow(InputError);

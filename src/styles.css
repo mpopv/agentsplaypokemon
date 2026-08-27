@@ -158,7 +158,11 @@ button { color: inherit; }
 .empty-party-mark { align-self: end; color: #394043; font-size: 2rem; line-height: 1; }
 
 .compact-heading { border-bottom: 1px solid var(--line-soft); }
-.chat-log { min-height: 0; overflow-y: auto; padding: 10px 18px 6px; scrollbar-color: #687174 transparent; }
+.log-shell { position: relative; min-height: 0; overflow: hidden; }
+.chat-log { height: 100%; min-height: 0; overflow-y: auto; padding: 10px 18px 6px; scrollbar-color: #687174 transparent; }
+.history-marker { width: fit-content; margin: 0 auto 7px; padding: 3px 8px; color: #747d7f; border: 1px solid var(--line-soft); font-size: .56rem; letter-spacing: .055em; text-transform: uppercase; }
+.new-items-button { position: absolute; right: 14px; bottom: 10px; z-index: 2; padding: 5px 9px; border: 1px solid var(--acid); color: #0a0d0d; background: var(--acid); box-shadow: 0 3px 14px rgba(0,0,0,.45); cursor: pointer; font-size: .62rem; font-weight: 700; letter-spacing: .04em; }
+.new-items-button:hover, .new-items-button:focus-visible { background: #d0ff7b; outline: 1px solid #d0ff7b; outline-offset: 2px; }
 .chat-line { display: grid; grid-template-columns: 65px 120px 1fr; gap: 8px; padding: 2px 0; font-size: .78rem; line-height: 1.35; }
 .chat-line time { color: var(--muted); }
 .chat-line strong { overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
@@ -188,7 +192,7 @@ button { color: inherit; }
 
 .live-label { color: var(--acid) !important; }
 .offline-label { color: var(--amber) !important; }
-.event-log { min-height: 0; overflow-y: auto; padding: 0 12px; scrollbar-color: #687174 transparent; }
+.event-log { height: 100%; min-height: 0; overflow-y: auto; padding: 7px 12px 0; scrollbar-color: #687174 transparent; }
 .computer-event { position: relative; display: grid; grid-template-columns: 12px 98px 105px minmax(0, 1fr) 45px; gap: 8px; padding: 9px 4px; border-bottom: 1px solid var(--line-soft); font-size: .73rem; line-height: 1.4; }
 .event-mark { width: 10px; height: 10px; margin-top: 3px; background: var(--cyan); }
 .computer-event.is-error .event-mark { background: var(--red); }

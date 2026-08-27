@@ -17,6 +17,7 @@ import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflar
 import type {
   AgentIdentity,
   ComputerEvent,
+  ComputerEventHistoryPage,
   ComputerExecResult,
   ComputerFileHistoryEntry,
   ComputerFileView,
@@ -26,6 +27,7 @@ import type {
   SocketEnvelope
 } from "../shared/types";
 import { bytesToBase64, readStream, safeTextPreview } from "./lib/encoding";
+import { makeHistoryPage } from "./lib/history-page";
 import { InputError, parseCommand, parseWorkspacePath } from "./lib/validation";
 
 interface ComputerMetaRow {
@@ -95,6 +97,7 @@ const MAX_TRACKED_ENTRIES = 2_000;
 const MAX_SNAPSHOT_ENTRIES = 5_000;
 const MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024;
 const EXEC_RATE_LIMIT_MS = 1_000;
+const COMPUTER_EVENT_HISTORY_PAGE_SIZE = 20;
 
 class SharedComputerContainerBase extends withWorkspaceContainer(
   class extends DurableObject<Env> {}
@@ -217,6 +220,42 @@ export class SharedComputerDO extends withWorkspace(
       roomId,
       filesystemRevision: this.readMeta().filesystem_revision,
       events: this.readEvents(after, 100)
+    };
+  }
+
+  async eventHistory(roomId: string, before?: number): Promise<ComputerEventHistoryPage> {
+    this.identify(roomId);
+    await this.ensureInitialized(roomId);
+    const rows = before === undefined
+      ? this.ctx.storage.sql
+          .exec<ComputerEventRow>(
+            `SELECT sequence, agent_id, display_name, event_type, command, exit_code,
+                    stdout_preview, stderr_preview, filesystem_revision, created_at
+             FROM computer_events
+             ORDER BY sequence DESC
+             LIMIT ?`,
+            COMPUTER_EVENT_HISTORY_PAGE_SIZE + 1
+          )
+          .toArray()
+      : this.ctx.storage.sql
+          .exec<ComputerEventRow>(
+            `SELECT sequence, agent_id, display_name, event_type, command, exit_code,
+                    stdout_preview, stderr_preview, filesystem_revision, created_at
+             FROM computer_events
+             WHERE sequence < ?
+             ORDER BY sequence DESC
+             LIMIT ?`,
+            before,
+            COMPUTER_EVENT_HISTORY_PAGE_SIZE + 1
+          )
+          .toArray();
+    const page = makeHistoryPage(rows, COMPUTER_EVENT_HISTORY_PAGE_SIZE);
+    return {
+      roomId,
+      filesystemRevision: this.readMeta().filesystem_revision,
+      events: page.items.map(mapEvent),
+      nextBefore: page.nextBefore,
+      hasMore: page.hasMore
     };
   }
 

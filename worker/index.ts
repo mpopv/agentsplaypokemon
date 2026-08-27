@@ -17,6 +17,7 @@ import {
   parseCommand,
   parseCursor,
   parseGameInput,
+  parseOptionalCursor,
   parseRoomId,
   parseWorkspacePath,
   readJsonObject
@@ -98,6 +99,13 @@ app.get("/rooms/:roomId/chat", async (context) => {
   });
 });
 
+app.get("/rooms/:roomId/chat/history", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const before = parseOptionalCursor(context.req.query("before"));
+  const game = context.env.GAME_ROOMS.getByName(roomId);
+  return context.json(await game.readChatHistory(roomId, context.get("agent"), before));
+});
+
 app.post("/rooms/:roomId/chat", async (context) => {
   enforceSameOrigin(context.req.raw);
   const roomId = parseRoomId(context.req.param("roomId"));
@@ -176,6 +184,13 @@ app.get("/rooms/:roomId/computer", async (context) => {
   const after = parseCursor(context.req.query("after"));
   const computer = context.env.SHARED_COMPUTERS.getByName(roomId);
   return context.json(await computer.overview(roomId, after));
+});
+
+app.get("/rooms/:roomId/computer/events", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const before = parseOptionalCursor(context.req.query("before"));
+  const computer = context.env.SHARED_COMPUTERS.getByName(roomId);
+  return context.json(await computer.eventHistory(roomId, before));
 });
 
 app.get("/rooms/:roomId/computer/tree", async (context) => {

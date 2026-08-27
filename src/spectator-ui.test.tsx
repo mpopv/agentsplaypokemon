@@ -41,7 +41,13 @@ describe("spectator-only interface", () => {
 
   it("shows chat without a message form", () => {
     const markup = renderToStaticMarkup(
-      <ChatPanel messages={[]} activeAgents={game.activeAgents} />
+      <ChatPanel
+        messages={[]}
+        activeAgents={game.activeAgents}
+        hasMore={false}
+        loadingOlder={false}
+        onLoadOlder={async () => undefined}
+      />
     );
 
     expect(markup).not.toContain("<form");

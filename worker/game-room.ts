@@ -3,6 +3,7 @@ import { Container } from "@cloudflare/containers";
 import {
   GAME_INPUTS,
   type AgentIdentity,
+  type ChatHistoryPage,
   type ChatMessage,
   type GameEvent,
   type GameInput,
@@ -11,6 +12,7 @@ import {
   type VoteTally,
   type VoteWindow
 } from "../shared/types";
+import { makeHistoryPage } from "./lib/history-page";
 import { InputError } from "./lib/validation";
 
 interface RoomMetaRow {
@@ -67,6 +69,7 @@ interface ResolvePayload {
 
 const PRESENCE_TTL_MS = 120_000;
 const CHAT_RATE_LIMIT_MS = 2_000;
+const CHAT_HISTORY_PAGE_SIZE = 30;
 const ROM_MAX_BYTES = 8 * 1024 * 1024;
 const FRAME_MAX_BYTES = 1024 * 1024;
 const STATE_MAX_BYTES = 4 * 1024 * 1024;
@@ -173,6 +176,42 @@ export class GameRoomDO extends Container<Env> {
       )
       .toArray()
       .map(mapChat);
+  }
+
+  readChatHistory(
+    roomId: string,
+    agent: AgentIdentity,
+    before?: number
+  ): ChatHistoryPage {
+    this.identify(roomId);
+    this.touchPresence(agent);
+    const rows = before === undefined
+      ? this.ctx.storage.sql
+          .exec<ChatRow>(
+            `SELECT sequence, agent_id, display_name, message, created_at
+             FROM chat_messages
+             ORDER BY sequence DESC
+             LIMIT ?`,
+            CHAT_HISTORY_PAGE_SIZE + 1
+          )
+          .toArray()
+      : this.ctx.storage.sql
+          .exec<ChatRow>(
+            `SELECT sequence, agent_id, display_name, message, created_at
+             FROM chat_messages
+             WHERE sequence < ?
+             ORDER BY sequence DESC
+             LIMIT ?`,
+            before,
+            CHAT_HISTORY_PAGE_SIZE + 1
+          )
+          .toArray();
+    const page = makeHistoryPage(rows, CHAT_HISTORY_PAGE_SIZE);
+    return {
+      messages: page.items.map(mapChat),
+      nextBefore: page.nextBefore,
+      hasMore: page.hasMore
+    };
   }
 
   sendChat(roomId: string, agent: AgentIdentity, message: string): ChatMessage {

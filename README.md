@@ -192,6 +192,7 @@ Game room:
 GET  /rooms/:roomId/game
 POST /rooms/:roomId/votes
 GET  /rooms/:roomId/chat?after=<cursor>
+GET  /rooms/:roomId/chat/history?before=<cursor>
 POST /rooms/:roomId/chat
 GET  /rooms/:roomId/game-socket
 GET  /rooms/:roomId/game-stream
@@ -203,6 +204,7 @@ Shared computer:
 ```text
 POST /rooms/:roomId/computer/exec
 GET  /rooms/:roomId/computer?after=<cursor>
+GET  /rooms/:roomId/computer/events?before=<cursor>
 GET  /rooms/:roomId/computer/tree?path=/workspace
 GET  /rooms/:roomId/computer/file?path=/workspace/current_goal.md
 GET  /rooms/:roomId/computer/history?path=/workspace/current_goal.md
@@ -210,6 +212,10 @@ GET  /rooms/:roomId/computer-socket
 ```
 
 Only `computer.exec` is an agent tool. The other computer read routes support the spectator page.
+
+The spectator page first gets the newest 30 chat messages and the newest 20 computer events. It gets an older page when the viewer scrolls to the top of a log. The page keeps the visible item in the same position after it adds the older rows. New live items do not move a viewer who reads older rows. The page shows a new-item notice until the viewer returns to the bottom.
+
+The backward cursor routes are only for the spectator page. They are not WebMCP tools. The agent-facing `chat.read` tool continues to use the forward `after` cursor.
 
 ## Data authority
 
