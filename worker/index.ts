@@ -41,7 +41,8 @@ app.use("*", async (context, next) => {
   context.header("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   context.header(
     "content-security-policy",
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+    "default-src 'self'; script-src 'self'; style-src 'self'; " +
+      "img-src 'self' data: blob: https://raw.githubusercontent.com; " +
       "connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
       "form-action 'self'; frame-ancestors 'none'"
   );

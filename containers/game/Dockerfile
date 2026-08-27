@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /app
 COPY server.py /app/server.py
+COPY pokemon_red.py /app/pokemon_red.py
 
 RUN chown -R emulator:emulator /app
 

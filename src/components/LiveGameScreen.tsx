@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import type { PokemonPartySnapshot } from "../../shared/types";
 import { gameStreamUrl, readGameFrame, sessionSocketProtocols } from "../api";
 
 type StreamState = "checkpoint" | "connecting" | "live" | "retrying";
@@ -9,9 +10,16 @@ interface LiveGameScreenProps {
   frameUrl: string;
   alt: string;
   mode: "demo" | "rom";
+  onPartyUpdate?: (snapshot: PokemonPartySnapshot) => void;
 }
 
-export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenProps) {
+export function LiveGameScreen({
+  roomId,
+  frameUrl,
+  alt,
+  mode,
+  onPartyUpdate
+}: LiveGameScreenProps) {
   const enabled = mode === "rom";
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [checkpointUrl, setCheckpointUrl] = useState<string | null>(null);
@@ -111,7 +119,13 @@ export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenPr
         if (generation === connectionGeneration) attempt = 0;
       });
       nextSocket.addEventListener("message", (event) => {
-        if (generation !== connectionGeneration || !(event.data instanceof ArrayBuffer)) return;
+        if (generation !== connectionGeneration) return;
+        if (typeof event.data === "string") {
+          const snapshot = parsePartyMessage(event.data);
+          if (snapshot !== null) onPartyUpdate?.(snapshot);
+          return;
+        }
+        if (!(event.data instanceof ArrayBuffer)) return;
         latestFrame = { data: event.data, generation, source: nextSocket };
         void drawLatestFrame();
       });
@@ -136,7 +150,7 @@ export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenPr
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       socket?.close(1000, "page closed");
     };
-  }, [enabled, roomId]);
+  }, [enabled, onPartyUpdate, roomId]);
 
   const live = streamState === "live";
   return (
@@ -154,6 +168,52 @@ export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenPr
       </div>
       <span className="screen-mode">{streamLabel(mode, streamState)}</span>
     </div>
+  );
+}
+
+export function parsePartyMessage(message: string): PokemonPartySnapshot | null {
+  try {
+    const envelope = JSON.parse(message) as { type?: unknown; payload?: unknown };
+    if (envelope.type !== "pokemon.party" || !isPartySnapshot(envelope.payload)) return null;
+    return envelope.payload;
+  } catch {
+    return null;
+  }
+}
+
+function isPartySnapshot(value: unknown): value is PokemonPartySnapshot {
+  if (!isRecord(value) || typeof value.available !== "boolean" || !Array.isArray(value.party)) {
+    return false;
+  }
+  if (value.party.length > 6) return false;
+  return value.party.every((member) => {
+    if (!isRecord(member)) return false;
+    return (
+      isIntegerInRange(member.slot, 1, 6) &&
+      typeof member.nickname === "string" &&
+      typeof member.species === "string" &&
+      isIntegerInRange(member.pokedexNumber, 1, 151) &&
+      isIntegerInRange(member.level, 1, 100) &&
+      isIntegerInRange(member.hp, 0, 999) &&
+      isIntegerInRange(member.maxHp, 1, 999) &&
+      member.hp <= member.maxHp &&
+      ["OK", "SLP", "PSN", "BRN", "FRZ", "PAR", "FNT"].includes(String(member.status)) &&
+      typeof member.active === "boolean" &&
+      typeof member.fainted === "boolean"
+    );
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isIntegerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= minimum &&
+    value <= maximum
   );
 }
 

@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pyboy import PyBoy
+from pokemon_red import (
+    PartyDataError,
+    SUPPORTED_ROM_SHA256,
+    read_party,
+    unavailable_party,
+)
 
 
 MAX_ROM_BYTES = 8 * 1024 * 1024
@@ -21,12 +27,15 @@ ROM_PATH = Path("/app/current.gb")
 FRAME_RATE = 60
 FRAME_INTERVAL_SECONDS = 1 / FRAME_RATE
 STREAM_FRAME_RATE = 30
+PARTY_SAMPLE_INTERVAL_SECONDS = 0.25
 
 
 class BinarySocket(Protocol):
     closed: bool
 
     async def send_bytes(self, data: bytes) -> None: ...
+
+    async def send_str(self, data: str) -> None: ...
 
     async def close(self, *, code: int = 1000, message: bytes = b"") -> Any: ...
 
@@ -37,6 +46,7 @@ class Emulator:
         self.frame_condition = threading.Condition(self.lock)
         self.pyboy: PyBoy | None = None
         self.rom_sha256: str | None = None
+        self.last_party_snapshot: dict[str, Any] | None = None
         self.pending_release: tuple[str, int] | None = None
         self.stopped = threading.Event()
         self.runner = threading.Thread(
@@ -58,6 +68,7 @@ class Emulator:
             self.pyboy.tick(1, True)
             self.pending_release = None
             self.rom_sha256 = hashlib.sha256(data).hexdigest()
+            self.last_party_snapshot = None
             self.frame_condition.notify_all()
             return {"loaded": True, "romSha256": self.rom_sha256}
 
@@ -104,6 +115,19 @@ class Emulator:
             self._require().load_state(source)
             self._require().tick(1, True)
             self.pending_release = None
+            self.last_party_snapshot = None
+
+    def party_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            pyboy = self._require()
+            if self.rom_sha256 != SUPPORTED_ROM_SHA256:
+                return unavailable_party()
+            try:
+                snapshot = read_party(pyboy.memory)
+            except PartyDataError:
+                return self.last_party_snapshot or unavailable_party()
+            self.last_party_snapshot = snapshot
+            return snapshot
 
     def status(self) -> dict[str, str | bool | int | None]:
         with self.lock:
@@ -172,23 +196,35 @@ class Emulator:
 
 
 class FrameBroadcaster:
-    def __init__(self, emulator: Emulator, frame_rate: int = STREAM_FRAME_RATE) -> None:
+    def __init__(
+        self,
+        emulator: Emulator,
+        frame_rate: int = STREAM_FRAME_RATE,
+        party_sample_interval_seconds: float = PARTY_SAMPLE_INTERVAL_SECONDS,
+    ) -> None:
         self.emulator = emulator
         self.frame_interval_seconds = 1 / frame_rate
+        self.party_sample_interval_seconds = party_sample_interval_seconds
         self.clients: set[BinarySocket] = set()
         self.client_available = asyncio.Event()
-        self.send_tasks: dict[BinarySocket, asyncio.Task[None]] = {}
+        self.send_tasks: dict[BinarySocket, tuple[asyncio.Task[None], str | None]] = {}
+        self.sent_party_messages: dict[BinarySocket, str | None] = {}
+        self.latest_party_message: str | None = None
+        self.next_party_sample_at = 0.0
         self.producer: asyncio.Task[None] | None = None
 
     def add(self, socket: BinarySocket) -> None:
         self.clients.add(socket)
+        self.sent_party_messages[socket] = None
         self.client_available.set()
 
     async def remove(self, socket: BinarySocket) -> None:
         self.clients.discard(socket)
         if not self.clients:
             self.client_available.clear()
-        task = self.send_tasks.pop(socket, None)
+        self.sent_party_messages.pop(socket, None)
+        entry = self.send_tasks.pop(socket, None)
+        task = entry[0] if entry is not None else None
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -203,8 +239,9 @@ class FrameBroadcaster:
             await asyncio.gather(self.producer, return_exceptions=True)
             self.producer = None
 
-        tasks = list(self.send_tasks.values())
+        tasks = [entry[0] for entry in self.send_tasks.values()]
         self.send_tasks.clear()
+        self.sent_party_messages.clear()
         for task in tasks:
             task.cancel()
         if tasks:
@@ -221,11 +258,12 @@ class FrameBroadcaster:
     async def broadcast_once(self) -> bool:
         ready: list[BinarySocket] = []
         for client in tuple(self.clients):
-            task = self.send_tasks.get(client)
-            if task is not None and task.done():
-                self._finish_send(client, task)
+            entry = self.send_tasks.get(client)
+            if entry is not None and entry[0].done():
+                self._finish_send(client, entry[0], entry[1])
             if client.closed:
                 self.clients.discard(client)
+                self.sent_party_messages.pop(client, None)
             elif client not in self.send_tasks:
                 ready.append(client)
 
@@ -242,13 +280,50 @@ class FrameBroadcaster:
                 flush=True,
             )
             return False
+
+        now = asyncio.get_running_loop().time()
+        if self.latest_party_message is None or now >= self.next_party_sample_at:
+            try:
+                snapshot = await asyncio.to_thread(self.emulator.party_snapshot)
+                self.latest_party_message = json.dumps(
+                    {"type": "pokemon.party", "payload": snapshot},
+                    separators=(",", ":"),
+                )
+            except RuntimeError:
+                self.latest_party_message = None
+            except Exception as error:
+                print(
+                    json.dumps(
+                        {"message": "party telemetry failed", "error": str(error)}
+                    ),
+                    flush=True,
+                )
+            self.next_party_sample_at = now + self.party_sample_interval_seconds
+
         for client in ready:
-            task = asyncio.create_task(client.send_bytes(frame))
-            self.send_tasks[client] = task
+            party_message = (
+                self.latest_party_message
+                if self.sent_party_messages.get(client) != self.latest_party_message
+                else None
+            )
+            task = asyncio.create_task(self._send(client, frame, party_message))
+            self.send_tasks[client] = (task, party_message)
             task.add_done_callback(
-                lambda completed, socket=client: self._finish_send(socket, completed)
+                lambda completed, socket=client, message=party_message: self._finish_send(
+                    socket, completed, message
+                )
             )
         return True
+
+    async def _send(
+        self,
+        socket: BinarySocket,
+        frame: bytes,
+        party_message: str | None,
+    ) -> None:
+        if party_message is not None:
+            await socket.send_str(party_message)
+        await socket.send_bytes(frame)
 
     async def _run(self) -> None:
         next_frame_at = asyncio.get_running_loop().time()
@@ -268,16 +343,25 @@ class FrameBroadcaster:
             if next_frame_at < asyncio.get_running_loop().time() - self.frame_interval_seconds:
                 next_frame_at = asyncio.get_running_loop().time()
 
-    def _finish_send(self, socket: BinarySocket, task: asyncio.Task[None]) -> None:
-        if self.send_tasks.get(socket) is not task:
+    def _finish_send(
+        self,
+        socket: BinarySocket,
+        task: asyncio.Task[None],
+        party_message: str | None,
+    ) -> None:
+        entry = self.send_tasks.get(socket)
+        if entry is None or entry[0] is not task:
             return
         self.send_tasks.pop(socket, None)
         if task.cancelled():
             return
         try:
             task.result()
+            if party_message is not None:
+                self.sent_party_messages[socket] = party_message
         except Exception:
             self.clients.discard(socket)
+            self.sent_party_messages.pop(socket, None)
             asyncio.create_task(self._close_failed_socket(socket))
 
     async def _close_failed_socket(self, socket: BinarySocket) -> None:

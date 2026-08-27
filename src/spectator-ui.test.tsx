@@ -5,6 +5,8 @@ import { GAME_INPUTS, type GameObservation } from "../shared/types";
 import { AgentGuide } from "./components/AgentGuide";
 import { ChatPanel } from "./components/ChatPanel";
 import { GamePanel } from "./components/GamePanel";
+import { parsePartyMessage } from "./components/LiveGameScreen";
+import { PokemonPartyPanel } from "./components/PokemonPartyPanel";
 
 const game: GameObservation = {
   roomId: "main",
@@ -58,5 +60,51 @@ describe("spectator-only interface", () => {
     for (const tool of ["game.observe", "game.vote", "chat.read", "chat.send", "computer.exec"]) {
       expect(markup).toContain(tool);
     }
+  });
+
+  it("shows all six party slots with live Pokémon details", () => {
+    const markup = renderToStaticMarkup(
+      <PokemonPartyPanel
+        snapshot={{
+          available: true,
+          party: [
+            {
+              slot: 1,
+              nickname: "SPARKY",
+              species: "PIKACHU",
+              pokedexNumber: 25,
+              level: 18,
+              hp: 37,
+              maxHp: 45,
+              status: "PAR",
+              active: true,
+              fainted: false
+            }
+          ]
+        }}
+      />
+    );
+
+    expect(markup.match(/pokemon-party-card/g)).toHaveLength(6);
+    expect(markup).toContain("SPARKY");
+    expect(markup).toContain("PIKACHU");
+    expect(markup).toContain("LV 18");
+    expect(markup).toContain("37/45");
+    expect(markup).toContain("PAR");
+    expect(markup).toContain("generation-i/red-blue/25.png");
+    expect(markup.match(/EMPTY PARTY SLOT/g)).toHaveLength(5);
+  });
+
+  it("accepts only valid party messages from the game stream", () => {
+    const valid = parsePartyMessage(
+      JSON.stringify({
+        type: "pokemon.party",
+        payload: { available: true, party: [] }
+      })
+    );
+
+    expect(valid).toEqual({ available: true, party: [] });
+    expect(parsePartyMessage('{"type":"other","payload":{}}')).toBeNull();
+    expect(parsePartyMessage("not json")).toBeNull();
   });
 });

@@ -1,4 +1,9 @@
-import { GAME_INPUTS, type GameInput, type GameObservation } from "../../shared/types";
+import {
+  GAME_INPUTS,
+  type GameInput,
+  type GameObservation,
+  type PokemonPartySnapshot
+} from "../../shared/types";
 import { LiveGameScreen } from "./LiveGameScreen";
 
 const INPUT_LABELS: Record<GameInput, { glyph: string; label: string }> = {
@@ -14,9 +19,10 @@ const INPUT_LABELS: Record<GameInput, { glyph: string; label: string }> = {
 
 interface GamePanelProps {
   game: GameObservation | null;
+  onPartyUpdate?: (snapshot: PokemonPartySnapshot) => void;
 }
 
-export function GamePanel({ game }: GamePanelProps) {
+export function GamePanel({ game, onPartyUpdate }: GamePanelProps) {
   const endsIn = game ? Math.max(0, Math.ceil((game.voteWindow.endsAt - Date.now()) / 1000)) : 0;
   const totalVotes = game?.votes.reduce((sum, vote) => sum + vote.count, 0) ?? 0;
 
@@ -36,6 +42,7 @@ export function GamePanel({ game }: GamePanelProps) {
               frameUrl={game.frameUrl}
               alt={`Current game frame. Last input: ${game.lastInput ?? "none"}.`}
               mode={game.mode}
+              onPartyUpdate={onPartyUpdate}
             />
           ) : (
             <div className="game-screen game-screen-loading">STARTING ROOM…</div>

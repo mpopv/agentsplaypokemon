@@ -40,6 +40,7 @@ fake_pyboy.PyBoy = FakePyBoy
 sys.modules["pyboy"] = fake_pyboy
 
 server_path = Path(__file__).with_name("server.py")
+sys.path.insert(0, str(server_path.parent))
 server_spec = importlib.util.spec_from_file_location("game_server", server_path)
 if server_spec is None or server_spec.loader is None:
     raise RuntimeError("cannot load the game server module")
@@ -93,6 +94,8 @@ class EmulatorTest(unittest.TestCase):
 class FakeFrameSource:
     def __init__(self) -> None:
         self.frame_calls = 0
+        self.party_calls = 0
+        self.party = {"available": True, "party": []}
 
     def status(self) -> dict[str, bool]:
         return {"loaded": True}
@@ -100,6 +103,10 @@ class FakeFrameSource:
     def frame(self) -> bytes:
         self.frame_calls += 1
         return b"png-frame"
+
+    def party_snapshot(self) -> dict[str, object]:
+        self.party_calls += 1
+        return self.party
 
 
 class FakeSocket:
@@ -109,12 +116,16 @@ class FakeSocket:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.frames: list[bytes] = []
+        self.messages: list[str] = []
 
     async def send_bytes(self, data: bytes) -> None:
         self.started.set()
         if self.blocked:
             await self.release.wait()
         self.frames.append(data)
+
+    async def send_str(self, data: str) -> None:
+        self.messages.append(data)
 
     async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
         del code, message
@@ -124,7 +135,7 @@ class FakeSocket:
 class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
     async def test_one_encoding_is_shared_by_all_ready_clients(self) -> None:
         source = FakeFrameSource()
-        broadcaster = server.FrameBroadcaster(source)
+        broadcaster = server.FrameBroadcaster(source, party_sample_interval_seconds=0)
         first = FakeSocket()
         second = FakeSocket()
         broadcaster.add(first)
@@ -135,13 +146,32 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(sent)
         self.assertEqual(source.frame_calls, 1)
+        self.assertEqual(source.party_calls, 1)
         self.assertEqual(first.frames, [b"png-frame"])
         self.assertEqual(second.frames, [b"png-frame"])
+        self.assertEqual(len(first.messages), 1)
+        self.assertEqual(first.messages, second.messages)
+        await broadcaster.stop()
+
+    async def test_unchanged_party_is_not_sent_twice(self) -> None:
+        source = FakeFrameSource()
+        broadcaster = server.FrameBroadcaster(source, party_sample_interval_seconds=0)
+        socket = FakeSocket()
+        broadcaster.add(socket)
+
+        self.assertTrue(await broadcaster.broadcast_once())
+        await asyncio.sleep(0)
+        self.assertTrue(await broadcaster.broadcast_once())
+        await asyncio.sleep(0)
+
+        self.assertEqual(source.party_calls, 2)
+        self.assertEqual(len(socket.messages), 1)
+        self.assertEqual(socket.frames, [b"png-frame", b"png-frame"])
         await broadcaster.stop()
 
     async def test_slow_client_drops_new_frames_instead_of_building_a_queue(self) -> None:
         source = FakeFrameSource()
-        broadcaster = server.FrameBroadcaster(source)
+        broadcaster = server.FrameBroadcaster(source, party_sample_interval_seconds=0)
         socket = FakeSocket(blocked=True)
         broadcaster.add(socket)
 

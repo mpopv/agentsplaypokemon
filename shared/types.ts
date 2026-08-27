@@ -67,6 +67,26 @@ export interface GameObservation {
   events: GameEvent[];
 }
 
+export type PokemonStatus = "OK" | "SLP" | "PSN" | "BRN" | "FRZ" | "PAR" | "FNT";
+
+export interface PokemonPartyMember {
+  slot: number;
+  nickname: string;
+  species: string;
+  pokedexNumber: number;
+  level: number;
+  hp: number;
+  maxHp: number;
+  status: PokemonStatus;
+  active: boolean;
+  fainted: boolean;
+}
+
+export interface PokemonPartySnapshot {
+  available: boolean;
+  party: PokemonPartyMember[];
+}
+
 export interface ComputerExecRequest {
   command: string;
   cwd?: string;
