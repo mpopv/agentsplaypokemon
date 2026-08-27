@@ -216,6 +216,8 @@ The application stores the command audit, private admin audit, and file history 
 
 The emulator and ROM stay outside `/workspace`. Game input comes only from resolved vote windows in `GameRoomDO`. The computer container cannot call the game Durable Object.
 
+While the room is active, PyBoy runs the ROM continuously at real-time speed. At each vote boundary, `GameRoomDO` applies the winning input, then publishes and saves the current frame and emulator state. An empty vote window still publishes and saves the running game.
+
 ## Preview status
 
 `@cloudflare/computer` is preview software. This project pins version `0.2.1`. Test container restart, workspace sync, WebSockets, snapshots, and restore in the target Cloudflare account before a public event.

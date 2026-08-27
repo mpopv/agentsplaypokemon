@@ -476,15 +476,13 @@ export class GameRoomDO extends Container<Env> {
       windowId
     );
 
-    if (winner !== null) {
-      try {
-        await this.applyInput(winner);
-      } catch (error) {
-        this.appendEvent("emulator.error", {
-          input: winner,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      }
+    try {
+      await this.advanceGame(winner);
+    } catch (error) {
+      this.appendEvent("emulator.error", {
+        input: winner,
+        message: error instanceof Error ? error.message : String(error)
+      });
     }
     const event = this.appendEvent("vote_window.resolved", { windowId, winner });
     this.broadcast("vote_window.resolved", event);
@@ -500,9 +498,10 @@ export class GameRoomDO extends Container<Env> {
     if (activeAgents > 0) await this.ensureVoteWindow();
   }
 
-  private async applyInput(input: GameInput): Promise<void> {
+  private async advanceGame(input: GameInput | null): Promise<void> {
     const meta = this.readMeta();
     if (meta.mode === "demo") {
+      if (input === null) return;
       let x = meta.demo_x;
       let y = meta.demo_y;
       if (input === "up") y = Math.max(0, y - 1);
@@ -523,17 +522,21 @@ export class GameRoomDO extends Container<Env> {
     }
 
     await this.ensureEmulatorLoaded(meta);
-    const response = await this.containerFetch("http://container/input", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ input, frames: 12 })
-    });
-    await expectContainerJson(response, "apply controller input");
+    if (input !== null) {
+      const response = await this.containerFetch("http://container/input", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input, frames: 12 })
+      });
+      await expectContainerJson(response, "apply controller input");
+    }
     if (!meta.frame_key || !meta.state_key) throw new Error("emulator storage keys are missing");
     await this.persistEmulatorArtifacts(meta.frame_key, meta.state_key);
     this.ctx.storage.sql.exec(
       `UPDATE room_meta
-       SET last_input = ?, frame_revision = frame_revision + 1, updated_at = ?
+       SET last_input = COALESCE(?, last_input),
+           frame_revision = frame_revision + 1,
+           updated_at = ?
        WHERE id = 1`,
       input,
       Date.now()

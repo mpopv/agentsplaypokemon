@@ -4,7 +4,9 @@ import hashlib
 import io
 import json
 import os
+import signal
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,13 +18,24 @@ MAX_ROM_BYTES = 8 * 1024 * 1024
 MAX_STATE_BYTES = 4 * 1024 * 1024
 VALID_INPUTS = {"up", "down", "left", "right", "a", "b", "start", "select"}
 ROM_PATH = Path("/app/current.gb")
+FRAME_RATE = 60
+FRAME_INTERVAL_SECONDS = 1 / FRAME_RATE
 
 
 class Emulator:
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        self.frame_condition = threading.Condition(self.lock)
         self.pyboy: PyBoy | None = None
         self.rom_sha256: str | None = None
+        self.pending_release: tuple[str, int] | None = None
+        self.stopped = threading.Event()
+        self.runner = threading.Thread(
+            target=self._run_realtime,
+            name="pyboy-realtime",
+            daemon=True,
+        )
+        self.runner.start()
 
     def load_rom(self, data: bytes) -> dict[str, str | bool]:
         if not data or len(data) > MAX_ROM_BYTES:
@@ -34,7 +47,9 @@ class Emulator:
             self.pyboy = PyBoy(str(ROM_PATH), window="null")
             self.pyboy.set_emulation_speed(0)
             self.pyboy.tick(1, True)
+            self.pending_release = None
             self.rom_sha256 = hashlib.sha256(data).hexdigest()
+            self.frame_condition.notify_all()
             return {"loaded": True, "romSha256": self.rom_sha256}
 
     def apply_input(self, value: str, frames: int) -> dict[str, int | str]:
@@ -42,14 +57,21 @@ class Emulator:
             raise ValueError("input is not valid")
         if frames < 1 or frames > 120:
             raise ValueError("frames must be between 1 and 120")
-        with self.lock:
+        with self.frame_condition:
             pyboy = self._require()
             press_frames = min(4, frames)
+            if self.pending_release is not None:
+                pyboy.button_release(self.pending_release[0])
             pyboy.button_press(value)
-            pyboy.tick(press_frames, press_frames == frames)
-            pyboy.button_release(value)
-            if frames > press_frames:
-                pyboy.tick(frames - press_frames, True)
+            first_frame = pyboy.frame_count
+            self.pending_release = (value, first_frame + press_frames)
+            final_frame = first_frame + frames
+            while self.pyboy is pyboy and pyboy.frame_count < final_frame:
+                if self.stopped.is_set():
+                    break
+                self.frame_condition.wait(timeout=1)
+            if self.pyboy is not pyboy:
+                raise RuntimeError("emulator stopped while applying input")
             return {"input": value, "frames": frames}
 
     def frame(self) -> bytes:
@@ -72,10 +94,67 @@ class Emulator:
             source = io.BytesIO(data)
             self._require().load_state(source)
             self._require().tick(1, True)
+            self.pending_release = None
 
-    def status(self) -> dict[str, str | bool | None]:
+    def status(self) -> dict[str, str | bool | int | None]:
         with self.lock:
-            return {"loaded": self.pyboy is not None, "romSha256": self.rom_sha256}
+            return {
+                "loaded": self.pyboy is not None,
+                "romSha256": self.rom_sha256,
+                "frameCount": self.pyboy.frame_count if self.pyboy is not None else None,
+            }
+
+    def shutdown(self) -> None:
+        self.stopped.set()
+        with self.frame_condition:
+            self.frame_condition.notify_all()
+        self.runner.join(timeout=1)
+        with self.lock:
+            if self.pyboy is not None:
+                self.pyboy.stop(save=False)
+                self.pyboy = None
+
+    def _run_realtime(self) -> None:
+        next_frame_at = time.monotonic()
+        while not self.stopped.is_set():
+            with self.lock:
+                pyboy = self.pyboy
+            if pyboy is None:
+                next_frame_at = time.monotonic()
+                self.stopped.wait(0.1)
+                continue
+
+            wait_seconds = next_frame_at - time.monotonic()
+            if wait_seconds > 0 and self.stopped.wait(wait_seconds):
+                break
+
+            try:
+                with self.frame_condition:
+                    if self.pyboy is not pyboy:
+                        next_frame_at = time.monotonic()
+                        continue
+                    pyboy.tick(1, True)
+                    if self.pending_release is not None:
+                        value, release_frame = self.pending_release
+                        if pyboy.frame_count >= release_frame:
+                            pyboy.button_release(value)
+                            self.pending_release = None
+                    self.frame_condition.notify_all()
+            except Exception as error:
+                with self.frame_condition:
+                    if self.pyboy is pyboy:
+                        self.pyboy = None
+                        self.pending_release = None
+                    self.frame_condition.notify_all()
+                print(
+                    json.dumps({"message": "real-time emulator loop failed", "error": str(error)}),
+                    flush=True,
+                )
+                continue
+
+            next_frame_at += FRAME_INTERVAL_SECONDS
+            if next_frame_at < time.monotonic() - FRAME_INTERVAL_SECONDS:
+                next_frame_at = time.monotonic()
 
     def _require(self) -> PyBoy:
         if self.pyboy is None:
@@ -177,8 +256,19 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     port = int(os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+
+    def stop_server(_signal_number: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_server)
     print(json.dumps({"message": "emulator server started", "port": port}), flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        EMULATOR.shutdown()
 
 
 if __name__ == "__main__":

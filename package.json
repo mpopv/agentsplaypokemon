@@ -14,7 +14,7 @@
     "dev": "npm run build && wrangler dev --port 8787",
     "dev:web": "vite",
     "dev:worker": "wrangler dev --port 8787",
-    "test": "vitest run",
+    "test": "vitest run && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s containers/game -p '*_test.py'",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "types": "wrangler types"
