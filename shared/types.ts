@@ -39,6 +39,31 @@ export interface VoteWindow {
   winner: GameInput | null;
 }
 
+export interface VoteChangedEvent {
+  sequence: number;
+  windowId: number;
+  agentId: string;
+  displayName: string;
+  input: GameInput;
+  votes: VoteTally[];
+  createdAt: number;
+}
+
+export interface VoteResolvedEvent {
+  sequence: number;
+  windowId: number;
+  winner: GameInput | null;
+  votes: VoteTally[];
+  createdAt: number;
+}
+
+export interface VoteOpenedEvent {
+  sequence: number;
+  voteWindow: VoteWindow;
+  votes: VoteTally[];
+  createdAt: number;
+}
+
 export interface GameEvent {
   sequence: number;
   eventType: string;
@@ -58,6 +83,57 @@ export interface ChatHistoryPage {
   messages: ChatMessage[];
   nextBefore: number | null;
   hasMore: boolean;
+}
+
+export interface AgentLastVote {
+  windowId: number;
+  input: GameInput;
+  createdAt: number;
+}
+
+export interface AgentLastChat {
+  message: string;
+  createdAt: number;
+}
+
+export interface AgentLastCommand {
+  command: string;
+  eventType: string;
+  exitCode: number | null;
+  filesystemRevision: number;
+  createdAt: number;
+}
+
+export interface GameAgentActivity {
+  displayName: string | null;
+  firstRecordedAt: number | null;
+  lastRecordedAt: number | null;
+  lastSeenAt: number | null;
+  online: boolean;
+  voteWindowCount: number;
+  chatMessageCount: number;
+  lastVote: AgentLastVote | null;
+  lastChat: AgentLastChat | null;
+}
+
+export interface ComputerAgentActivity {
+  displayName: string | null;
+  firstRecordedAt: number | null;
+  lastRecordedAt: number | null;
+  commandCount: number;
+  lastCommand: AgentLastCommand | null;
+}
+
+export interface AgentProfile extends AgentIdentity {
+  firstRecordedAt: number;
+  lastActiveAt: number;
+  online: boolean;
+  voteWindowCount: number;
+  chatMessageCount: number;
+  commandCount: number;
+  lastVote: AgentLastVote | null;
+  lastChat: AgentLastChat | null;
+  lastCommand: AgentLastCommand | null;
 }
 
 export interface GameObservation {

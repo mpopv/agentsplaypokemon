@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 
-import type { AgentIdentity } from "../shared/types";
+import type { AgentIdentity, AgentProfile } from "../shared/types";
 import { GameRoomDO } from "./game-room";
 import {
   authorizeAdmin,
@@ -13,6 +13,7 @@ import type { RuntimeEnv } from "./lib/runtime-env";
 import {
   enforceSameOrigin,
   InputError,
+  parseAgentId,
   parseChatMessage,
   parseCommand,
   parseCursor,
@@ -115,6 +116,47 @@ app.post("/rooms/:roomId/chat", async (context) => {
   return context.json(await game.sendChat(roomId, context.get("agent"), message), 201);
 });
 
+app.get("/rooms/:roomId/agents/:agentId", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const agentId = parseAgentId(context.req.param("agentId"));
+  const [gameActivity, computerActivity] = await Promise.all([
+    context.env.GAME_ROOMS.getByName(roomId).agentActivity(
+      roomId,
+      context.get("agent"),
+      agentId
+    ),
+    context.env.SHARED_COMPUTERS.getByName(roomId).agentActivity(roomId, agentId)
+  ]);
+  const displayName = gameActivity.displayName ?? computerActivity.displayName;
+  const firstRecordedAt = minimumTimestamp(
+    gameActivity.firstRecordedAt,
+    computerActivity.firstRecordedAt,
+    gameActivity.lastSeenAt
+  );
+  const lastActiveAt = maximumTimestamp(
+    gameActivity.lastRecordedAt,
+    gameActivity.lastSeenAt,
+    computerActivity.lastRecordedAt
+  );
+  if (displayName === null || firstRecordedAt === null || lastActiveAt === null) {
+    throw new InputError("agent was not found in this room", 404);
+  }
+  const profile: AgentProfile = {
+    agentId,
+    displayName,
+    firstRecordedAt,
+    lastActiveAt,
+    online: gameActivity.online,
+    voteWindowCount: gameActivity.voteWindowCount,
+    chatMessageCount: gameActivity.chatMessageCount,
+    commandCount: computerActivity.commandCount,
+    lastVote: gameActivity.lastVote,
+    lastChat: gameActivity.lastChat,
+    lastCommand: computerActivity.lastCommand
+  };
+  return context.json(profile);
+});
+
 app.get("/rooms/:roomId/game/frame", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const game = context.env.GAME_ROOMS.getByName(roomId);
@@ -164,6 +206,17 @@ app.get("/rooms/:roomId/game-stream", async (context) => {
     context.req.raw,
     context.env.GAME_ROOMS.getByName(roomId),
     "/internal/game-stream",
+    context.get("agent"),
+    roomId
+  );
+});
+
+app.get("/rooms/:roomId/game-audio", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return forwardSocket(
+    context.req.raw,
+    context.env.GAME_ROOMS.getByName(roomId),
+    "/internal/game-audio",
     context.get("agent"),
     roomId
   );
@@ -386,4 +439,14 @@ function readErrorStatus(error: unknown): number {
     return error.status;
   }
   return 500;
+}
+
+function minimumTimestamp(...values: Array<number | null>): number | null {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length === 0 ? null : Math.min(...present);
+}
+
+function maximumTimestamp(...values: Array<number | null>): number | null {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length === 0 ? null : Math.max(...present);
 }

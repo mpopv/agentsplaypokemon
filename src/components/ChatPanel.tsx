@@ -1,5 +1,6 @@
-import type { ChatMessage } from "../../shared/types";
+import type { AgentIdentity, ChatMessage } from "../../shared/types";
 import { useReverseInfiniteLog } from "../hooks/useReverseInfiniteLog";
+import { AgentName } from "./AgentName";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -7,6 +8,7 @@ interface ChatPanelProps {
   hasMore: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<void>;
+  onAgentOpen: (agent: AgentIdentity) => void;
 }
 
 export function ChatPanel({
@@ -14,7 +16,8 @@ export function ChatPanel({
   activeAgents,
   hasMore,
   loadingOlder,
-  onLoadOlder
+  onLoadOlder,
+  onAgentOpen
 }: ChatPanelProps) {
   const { logRef, newItemCount, scrollToLatest } = useReverseInfiniteLog({
     oldestSequence: messages[0]?.sequence,
@@ -40,7 +43,11 @@ export function ChatPanel({
               {messages.map((item) => (
                 <div className="chat-line" data-sequence={item.sequence} key={item.sequence}>
                   <time dateTime={new Date(item.createdAt).toISOString()}>{clock(item.createdAt)}</time>
-                  <strong style={{ color: nameColor(item.agentId) }}>{item.displayName}</strong>
+                  <AgentName
+                    agentId={item.agentId}
+                    displayName={item.displayName}
+                    onOpen={onAgentOpen}
+                  />
                   <span>{item.message}</span>
                 </div>
               ))}
@@ -83,11 +90,4 @@ function clock(timestamp: number): string {
     second: "2-digit",
     hour12: false
   }).format(timestamp);
-}
-
-function nameColor(value: string): string {
-  const colors = ["#53d9ed", "#ff9f43", "#bf8cff", "#68e0b5", "#ff6f7d", "#7ca7ff"];
-  let hash = 0;
-  for (const character of value) hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  return colors[Math.abs(hash) % colors.length] ?? "#53d9ed";
 }

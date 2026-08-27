@@ -1,5 +1,6 @@
 import {
   AGENT_SESSION_PROTOCOL_PREFIX,
+  type AgentProfile,
   type ChatHistoryPage,
   type ChatMessage,
   type ComputerEventHistoryPage,
@@ -85,6 +86,17 @@ export async function sendChat(roomId: string, message: string): Promise<ChatMes
   });
 }
 
+export async function readAgentProfile(
+  roomId: string,
+  agentId: string,
+  signal?: AbortSignal
+): Promise<AgentProfile> {
+  return api(
+    `/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(agentId)}`,
+    { signal }
+  );
+}
+
 export async function execComputer(
   roomId: string,
   command: string,
@@ -146,6 +158,10 @@ export function socketUrl(roomId: string, type: "game" | "computer"): string {
 
 export function gameStreamUrl(roomId: string): string {
   return webSocketUrl(`/rooms/${encodeURIComponent(roomId)}/game-stream`);
+}
+
+export function gameAudioUrl(roomId: string): string {
+  return webSocketUrl(`/rooms/${encodeURIComponent(roomId)}/game-audio`);
 }
 
 export function sessionSocketProtocols(): string[] {

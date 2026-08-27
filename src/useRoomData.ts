@@ -9,7 +9,9 @@ import type {
   ComputerTreeEntry,
   GameObservation,
   SessionInfo,
-  SocketEnvelope
+  SocketEnvelope,
+  VoteChangedEvent,
+  VoteResolvedEvent
 } from "../shared/types";
 import {
   ApiError,
@@ -26,6 +28,7 @@ import {
   startSession
 } from "./api";
 import { mergeBySequence } from "./lib/sequence";
+import { parseGameSocketEvent } from "./lib/game-socket";
 import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
 type ConnectionState = "connecting" | "open" | "closed";
@@ -35,6 +38,8 @@ let sessionRequest: Promise<SessionInfo> | undefined;
 export function useRoomData() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [game, setGame] = useState<GameObservation | null>(null);
+  const [voteActivity, setVoteActivity] = useState<VoteChangedEvent | null>(null);
+  const [voteResult, setVoteResult] = useState<VoteResolvedEvent | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [chatHasMore, setChatHasMore] = useState(false);
   const [chatLoadingOlder, setChatLoadingOlder] = useState(false);
@@ -277,6 +282,8 @@ export function useRoomData() {
     setChatHasMore(false);
     setComputerEvents([]);
     setComputerEventsHaveMore(false);
+    setVoteActivity(null);
+    setVoteResult(null);
     void Promise.all([
       refreshGame(),
       loadInitialChat(),
@@ -295,7 +302,6 @@ export function useRoomData() {
 
   useEffect(() => {
     if (!session) return;
-    const gameTimer = window.setInterval(() => void refreshGame(), 2_000);
     const chatTimer = window.setInterval(() => void refreshChat(), 2_500);
     const computerTimer = window.setInterval(() => void refreshComputer(), 3_000);
     const treeTimer = window.setInterval(() => {
@@ -303,18 +309,80 @@ export function useRoomData() {
       void loadSelectedFile();
     }, 4_000);
     return () => {
-      window.clearInterval(gameTimer);
       window.clearInterval(chatTimer);
       window.clearInterval(computerTimer);
       window.clearInterval(treeTimer);
     };
-  }, [loadSelectedFile, loadTree, refreshChat, refreshComputer, refreshGame, session]);
+  }, [loadSelectedFile, loadTree, refreshChat, refreshComputer, session]);
 
   useEffect(() => {
     if (!session) return;
     return connectRoomSocket(
       socketUrl(session.roomId, "game"),
       setGameSocket,
+      (envelope) => {
+        const event = parseGameSocketEvent(envelope);
+        if (event === null) return;
+        if (event.type === "chat.sent") {
+          chatNewestCursor.current = Math.max(
+            chatNewestCursor.current,
+            event.payload.sequence
+          );
+          setChat((current) => mergeBySequence(current, [event.payload]));
+          return;
+        }
+        if (event.type === "game.resync") {
+          void refreshGame();
+          return;
+        }
+        if (event.type === "vote.changed") {
+          setVoteActivity(event.payload);
+          setGame((current) => {
+            if (current === null || current.voteWindow.id !== event.payload.windowId) {
+              return current;
+            }
+            return {
+              ...current,
+              votes: event.payload.votes,
+              yourVote:
+                event.payload.agentId === session.agentId
+                  ? event.payload.input
+                  : current.yourVote
+            };
+          });
+          return;
+        }
+        if (event.type === "vote.resolved") {
+          setVoteResult(event.payload);
+          setGame((current) => {
+            if (current === null || current.voteWindow.id !== event.payload.windowId) {
+              return current;
+            }
+            return {
+              ...current,
+              votes: event.payload.votes,
+              lastInput: event.payload.winner ?? current.lastInput,
+              voteWindow: {
+                ...current.voteWindow,
+                status: "resolved",
+                winner: event.payload.winner
+              }
+            };
+          });
+          return;
+        }
+        setVoteActivity(null);
+        setGame((current) =>
+          current
+            ? {
+                ...current,
+                voteWindow: event.payload.voteWindow,
+                votes: event.payload.votes,
+                yourVote: null
+              }
+            : current
+        );
+      },
       () => {
         void refreshGame();
         void refreshChat();
@@ -367,6 +435,8 @@ export function useRoomData() {
   return {
     session,
     game,
+    voteActivity,
+    voteResult,
     chat,
     chatHasMore,
     chatLoadingOlder,
@@ -395,7 +465,8 @@ export function useRoomData() {
 function connectRoomSocket(
   url: string,
   setState: (state: ConnectionState) => void,
-  onEnvelope: (envelope: SocketEnvelope) => void
+  onEnvelope: (envelope: SocketEnvelope) => void,
+  onOpen?: () => void
 ): () => void {
   let stopped = false;
   let socket: WebSocket | undefined;
@@ -409,6 +480,7 @@ function connectRoomSocket(
     socket.addEventListener("open", () => {
       attempt = 0;
       setState("open");
+      onOpen?.();
     });
     socket.addEventListener("message", (event) => {
       try {
