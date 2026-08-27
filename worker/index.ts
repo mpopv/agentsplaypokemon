@@ -145,7 +145,19 @@ app.get("/rooms/:roomId/game-socket", async (context) => {
     context.req.raw,
     context.env.GAME_ROOMS.getByName(roomId),
     "/internal/game-socket",
-    context.get("agent")
+    context.get("agent"),
+    roomId
+  );
+});
+
+app.get("/rooms/:roomId/game-stream", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return forwardSocket(
+    context.req.raw,
+    context.env.GAME_ROOMS.getByName(roomId),
+    "/internal/game-stream",
+    context.get("agent"),
+    roomId
   );
 });
 
@@ -193,7 +205,8 @@ app.get("/rooms/:roomId/computer-socket", async (context) => {
     context.req.raw,
     context.env.SHARED_COMPUTERS.getByName(roomId),
     "/internal/computer-socket",
-    context.get("agent")
+    context.get("agent"),
+    roomId
   );
 });
 
@@ -309,7 +322,8 @@ async function forwardSocket(
   request: Request,
   stub: DurableObjectStub,
   path: string,
-  agent: AgentIdentity
+  agent: AgentIdentity,
+  roomId: string
 ): Promise<Response> {
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw new InputError("websocket upgrade required", 426);
@@ -317,6 +331,7 @@ async function forwardSocket(
   const headers = new Headers(request.headers);
   headers.set("x-agent-id", agent.agentId);
   headers.set("x-agent-name", agent.displayName);
+  headers.set("x-room-id", roomId);
   return stub.fetch(new Request(`https://internal${path}`, { method: "GET", headers }));
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import tempfile
@@ -87,6 +88,72 @@ class EmulatorTest(unittest.TestCase):
             self.assertGreaterEqual(pyboy.frame_count, first_frame + 12)
             self.assertEqual(pyboy.button_events, ["press:a", "release:a"])
         self.assertEqual(result, {"input": "a", "frames": 12})
+
+
+class FakeFrameSource:
+    def __init__(self) -> None:
+        self.frame_calls = 0
+
+    def status(self) -> dict[str, bool]:
+        return {"loaded": True}
+
+    def frame(self) -> bytes:
+        self.frame_calls += 1
+        return b"png-frame"
+
+
+class FakeSocket:
+    def __init__(self, blocked: bool = False) -> None:
+        self.closed = False
+        self.blocked = blocked
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.frames: list[bytes] = []
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.started.set()
+        if self.blocked:
+            await self.release.wait()
+        self.frames.append(data)
+
+    async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        del code, message
+        self.closed = True
+
+
+class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_one_encoding_is_shared_by_all_ready_clients(self) -> None:
+        source = FakeFrameSource()
+        broadcaster = server.FrameBroadcaster(source)
+        first = FakeSocket()
+        second = FakeSocket()
+        broadcaster.add(first)
+        broadcaster.add(second)
+
+        sent = await broadcaster.broadcast_once()
+        await asyncio.sleep(0)
+
+        self.assertTrue(sent)
+        self.assertEqual(source.frame_calls, 1)
+        self.assertEqual(first.frames, [b"png-frame"])
+        self.assertEqual(second.frames, [b"png-frame"])
+        await broadcaster.stop()
+
+    async def test_slow_client_drops_new_frames_instead_of_building_a_queue(self) -> None:
+        source = FakeFrameSource()
+        broadcaster = server.FrameBroadcaster(source)
+        socket = FakeSocket(blocked=True)
+        broadcaster.add(socket)
+
+        self.assertTrue(await broadcaster.broadcast_once())
+        await socket.started.wait()
+        self.assertFalse(await broadcaster.broadcast_once())
+        self.assertEqual(source.frame_calls, 1)
+
+        socket.release.set()
+        await asyncio.sleep(0)
+        self.assertEqual(socket.frames, [b"png-frame"])
+        await broadcaster.stop()
 
 
 if __name__ == "__main__":

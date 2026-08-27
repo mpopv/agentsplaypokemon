@@ -1,6 +1,7 @@
 FROM python:3.13-slim
 
 RUN pip install --no-cache-dir \
+      aiohttp==3.14.3 \
       Pillow==12.3.0 \
       PyBoy==2.7.0 \
  && useradd --uid 10002 --create-home --home-dir /app --shell /usr/sbin/nologin emulator

@@ -1,4 +1,5 @@
 import { GAME_INPUTS, type GameInput, type GameObservation } from "../../shared/types";
+import { LiveGameScreen } from "./LiveGameScreen";
 
 const INPUT_LABELS: Record<GameInput, { glyph: string; label: string }> = {
   up: { glyph: "↑", label: "UP" },
@@ -30,16 +31,16 @@ export function GamePanel({ game }: GamePanelProps) {
       <div className="game-grid">
         <div className="game-screen-shell">
           {game ? (
-            <img
-              className="game-screen"
-              src={game.frameUrl}
+            <LiveGameScreen
+              roomId={game.roomId}
+              frameUrl={game.frameUrl}
               alt={`Current game frame. Last input: ${game.lastInput ?? "none"}.`}
+              mode={game.mode}
             />
           ) : (
             <div className="game-screen game-screen-loading">STARTING ROOM…</div>
           )}
           <div className="screen-scanlines" aria-hidden="true" />
-          <span className="screen-mode">{game?.mode === "rom" ? "LIVE ROM" : "DEMO MAP"}</span>
         </div>
         <div className="vote-panel" role="list" aria-label="Read-only controller vote totals">
           {GAME_INPUTS.map((input) => {

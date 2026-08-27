@@ -280,6 +280,9 @@ export class GameRoomDO extends Container<Env> {
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/internal/game-stream") {
+      return this.openGameStream(request);
+    }
     if (url.pathname !== "/internal/game-socket") {
       return new Response("not found", { status: 404 });
     }
@@ -295,6 +298,44 @@ export class GameRoomDO extends Container<Env> {
     const server = pair[1];
     this.ctx.acceptWebSocket(server, ["game", `agent:${agentId}`]);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async openGameStream(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("websocket upgrade required", { status: 426 });
+    }
+    const roomId = request.headers.get("x-room-id");
+    const agentId = request.headers.get("x-agent-id");
+    const displayName = request.headers.get("x-agent-name");
+    if (!roomId || !agentId || !displayName) {
+      return new Response("unauthorized", { status: 401 });
+    }
+
+    this.identify(roomId);
+    this.touchPresence({ agentId, displayName });
+    const meta = this.readMeta();
+    if (meta.mode !== "rom") {
+      return new Response("live stream requires a ROM", { status: 409 });
+    }
+    await this.ensureEmulatorLoaded(meta);
+
+    const headers = new Headers(request.headers);
+    for (const name of [
+      "authorization",
+      "cookie",
+      "host",
+      "x-agent-id",
+      "x-agent-name",
+      "x-room-id"
+    ]) {
+      headers.delete(name);
+    }
+    return super.fetch(
+      new Request("http://container/game-stream", {
+        method: "GET",
+        headers
+      })
+    );
   }
 
   webSocketMessage(socket: WebSocket, _message: string | ArrayBuffer): void {

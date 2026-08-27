@@ -1,25 +1,34 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import os
-import signal
 import threading
 import time
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, Protocol
 
 from pyboy import PyBoy
 
 
 MAX_ROM_BYTES = 8 * 1024 * 1024
 MAX_STATE_BYTES = 4 * 1024 * 1024
+MAX_JSON_BYTES = 16 * 1024
 VALID_INPUTS = {"up", "down", "left", "right", "a", "b", "start", "select"}
 ROM_PATH = Path("/app/current.gb")
 FRAME_RATE = 60
 FRAME_INTERVAL_SECONDS = 1 / FRAME_RATE
+STREAM_FRAME_RATE = 30
+
+
+class BinarySocket(Protocol):
+    closed: bool
+
+    async def send_bytes(self, data: bytes) -> None: ...
+
+    async def close(self, *, code: int = 1000, message: bytes = b"") -> Any: ...
 
 
 class Emulator:
@@ -162,113 +171,264 @@ class Emulator:
         return self.pyboy
 
 
+class FrameBroadcaster:
+    def __init__(self, emulator: Emulator, frame_rate: int = STREAM_FRAME_RATE) -> None:
+        self.emulator = emulator
+        self.frame_interval_seconds = 1 / frame_rate
+        self.clients: set[BinarySocket] = set()
+        self.client_available = asyncio.Event()
+        self.send_tasks: dict[BinarySocket, asyncio.Task[None]] = {}
+        self.producer: asyncio.Task[None] | None = None
+
+    def add(self, socket: BinarySocket) -> None:
+        self.clients.add(socket)
+        self.client_available.set()
+
+    async def remove(self, socket: BinarySocket) -> None:
+        self.clients.discard(socket)
+        if not self.clients:
+            self.client_available.clear()
+        task = self.send_tasks.pop(socket, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def start(self) -> None:
+        if self.producer is None or self.producer.done():
+            self.producer = asyncio.create_task(self._run(), name="game-frame-stream")
+
+    async def stop(self) -> None:
+        if self.producer is not None:
+            self.producer.cancel()
+            await asyncio.gather(self.producer, return_exceptions=True)
+            self.producer = None
+
+        tasks = list(self.send_tasks.values())
+        self.send_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        clients = list(self.clients)
+        self.clients.clear()
+        if clients:
+            await asyncio.gather(
+                *(client.close(code=1001, message=b"server stopping") for client in clients),
+                return_exceptions=True,
+            )
+
+    async def broadcast_once(self) -> bool:
+        ready: list[BinarySocket] = []
+        for client in tuple(self.clients):
+            task = self.send_tasks.get(client)
+            if task is not None and task.done():
+                self._finish_send(client, task)
+            if client.closed:
+                self.clients.discard(client)
+            elif client not in self.send_tasks:
+                ready.append(client)
+
+        if not ready or not self.emulator.status()["loaded"]:
+            return False
+
+        try:
+            frame = await asyncio.to_thread(self.emulator.frame)
+        except RuntimeError:
+            return False
+        except Exception as error:
+            print(
+                json.dumps({"message": "game frame encoding failed", "error": str(error)}),
+                flush=True,
+            )
+            return False
+        for client in ready:
+            task = asyncio.create_task(client.send_bytes(frame))
+            self.send_tasks[client] = task
+            task.add_done_callback(
+                lambda completed, socket=client: self._finish_send(socket, completed)
+            )
+        return True
+
+    async def _run(self) -> None:
+        next_frame_at = asyncio.get_running_loop().time()
+        while True:
+            while not self.clients:
+                self.client_available.clear()
+                if self.clients:
+                    break
+                await self.client_available.wait()
+            next_frame_at = max(next_frame_at, asyncio.get_running_loop().time())
+
+            wait_seconds = next_frame_at - asyncio.get_running_loop().time()
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            await self.broadcast_once()
+            next_frame_at += self.frame_interval_seconds
+            if next_frame_at < asyncio.get_running_loop().time() - self.frame_interval_seconds:
+                next_frame_at = asyncio.get_running_loop().time()
+
+    def _finish_send(self, socket: BinarySocket, task: asyncio.Task[None]) -> None:
+        if self.send_tasks.get(socket) is not task:
+            return
+        self.send_tasks.pop(socket, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            self.clients.discard(socket)
+            asyncio.create_task(self._close_failed_socket(socket))
+
+    async def _close_failed_socket(self, socket: BinarySocket) -> None:
+        try:
+            await socket.close(code=1011, message=b"frame delivery failed")
+        except Exception:
+            pass
+
+
 EMULATOR = Emulator()
 
 
-class Handler(BaseHTTPRequestHandler):
-    server_version = "AgentsPlayPokemonEmulator/1"
+def create_app() -> Any:
+    from aiohttp import WSMsgType, WSCloseCode, web
 
-    def do_GET(self) -> None:
-        try:
-            if self.path == "/health":
-                self._json({"ok": True, **EMULATOR.status()})
-                return
-            if self.path == "/status":
-                self._json(EMULATOR.status())
-                return
-            if self.path == "/frame":
-                self._bytes(EMULATOR.frame(), "image/png")
-                return
-            if self.path == "/state":
-                self._bytes(EMULATOR.save_state(), "application/octet-stream")
-                return
-            self.send_error(HTTPStatus.NOT_FOUND)
-        except RuntimeError as error:
-            self._error(HTTPStatus.CONFLICT, str(error))
-        except Exception as error:
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+    broadcaster = FrameBroadcaster(EMULATOR)
 
-    def do_POST(self) -> None:
-        try:
-            if self.path == "/load":
-                self._json(EMULATOR.load_rom(self._body(MAX_ROM_BYTES)))
-                return
-            if self.path == "/load-state":
-                EMULATOR.load_state(self._body(MAX_STATE_BYTES))
-                self._json({"loaded": True})
-                return
-            if self.path == "/input":
-                payload = json.loads(self._body(16 * 1024).decode("utf-8"))
-                self._json(
-                    EMULATOR.apply_input(
-                        str(payload.get("input", "")).lower(),
-                        int(payload.get("frames", 12)),
-                    )
-                )
-                return
-            self.send_error(HTTPStatus.NOT_FOUND)
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
-            self._error(HTTPStatus.BAD_REQUEST, str(error))
-        except RuntimeError as error:
-            self._error(HTTPStatus.CONFLICT, str(error))
-        except Exception as error:
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+    def json_response(value: object, status: int = 200) -> Any:
+        return web.json_response(
+            value,
+            status=status,
+            dumps=lambda item: json.dumps(item, separators=(",", ":")),
+        )
 
-    def log_message(self, format: str, *args: object) -> None:
-        print(json.dumps({"message": format % args, "path": self.path}), flush=True)
+    def error_response(status: int, message: str) -> Any:
+        return json_response({"error": message}, status)
 
-    def _body(self, limit: int) -> bytes:
-        raw_length = self.headers.get("content-length")
+    async def read_body(request: Any, limit: int) -> bytes:
+        raw_length = request.headers.get("content-length")
         if raw_length is None:
             raise ValueError("content-length is required")
         length = int(raw_length)
         if length < 1 or length > limit:
             raise ValueError("request body is too large")
-        data = self.rfile.read(length)
+        data = await request.read()
         if len(data) != length:
             raise ValueError("request body is incomplete")
         return data
 
-    def _json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        self._bytes(
-            json.dumps(value, separators=(",", ":")).encode("utf-8"),
-            "application/json; charset=utf-8",
-            status,
+    @web.middleware
+    async def error_middleware(request: Any, handler: Any) -> Any:
+        try:
+            return await handler(request)
+        except web.HTTPException as error:
+            return error_response(error.status, error.reason)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            return error_response(400, str(error))
+        except RuntimeError as error:
+            return error_response(409, str(error))
+        except Exception as error:
+            print(
+                json.dumps(
+                    {
+                        "message": "emulator request failed",
+                        "path": request.path,
+                        "error": str(error),
+                    }
+                ),
+                flush=True,
+            )
+            return error_response(500, str(error))
+
+    async def set_response_headers(_request: Any, response: Any) -> None:
+        response.headers["cache-control"] = "no-store"
+
+    async def health(_request: Any) -> Any:
+        return json_response({"ok": True, **EMULATOR.status()})
+
+    async def status(_request: Any) -> Any:
+        return json_response(EMULATOR.status())
+
+    async def frame(_request: Any) -> Any:
+        data = await asyncio.to_thread(EMULATOR.frame)
+        return web.Response(body=data, content_type="image/png")
+
+    async def state(_request: Any) -> Any:
+        data = await asyncio.to_thread(EMULATOR.save_state)
+        return web.Response(body=data, content_type="application/octet-stream")
+
+    async def load(request: Any) -> Any:
+        data = await read_body(request, MAX_ROM_BYTES)
+        return json_response(await asyncio.to_thread(EMULATOR.load_rom, data))
+
+    async def load_state(request: Any) -> Any:
+        data = await read_body(request, MAX_STATE_BYTES)
+        await asyncio.to_thread(EMULATOR.load_state, data)
+        return json_response({"loaded": True})
+
+    async def apply_input(request: Any) -> Any:
+        payload = json.loads((await read_body(request, MAX_JSON_BYTES)).decode("utf-8"))
+        result = await asyncio.to_thread(
+            EMULATOR.apply_input,
+            str(payload.get("input", "")).lower(),
+            int(payload.get("frames", 12)),
         )
+        return json_response(result)
 
-    def _error(self, status: HTTPStatus, message: str) -> None:
-        self._json({"error": message}, status)
+    async def game_stream(request: Any) -> Any:
+        if request.headers.get("upgrade", "").lower() != "websocket":
+            return error_response(426, "websocket upgrade required")
+        if not EMULATOR.status()["loaded"]:
+            return error_response(409, "no ROM is loaded")
 
-    def _bytes(
-        self,
-        data: bytes,
-        content_type: str,
-        status: HTTPStatus = HTTPStatus.OK,
-    ) -> None:
-        self.send_response(status)
-        self.send_header("content-type", content_type)
-        self.send_header("content-length", str(len(data)))
-        self.send_header("cache-control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        socket = web.WebSocketResponse(heartbeat=15, max_msg_size=1024, compress=False)
+        await socket.prepare(request)
+        broadcaster.add(socket)
+        try:
+            async for message in socket:
+                if message.type in (WSMsgType.TEXT, WSMsgType.BINARY):
+                    await socket.close(
+                        code=WSCloseCode.POLICY_VIOLATION,
+                        message=b"game stream is read only",
+                    )
+                    break
+                if message.type == WSMsgType.ERROR:
+                    break
+        finally:
+            await broadcaster.remove(socket)
+        return socket
+
+    async def start_stream(_app: Any) -> None:
+        await broadcaster.start()
+
+    async def stop_stream(_app: Any) -> None:
+        await broadcaster.stop()
+
+    async def stop_service(_app: Any) -> None:
+        EMULATOR.shutdown()
+
+    app = web.Application(client_max_size=MAX_ROM_BYTES, middlewares=[error_middleware])
+    app.on_response_prepare.append(set_response_headers)
+    app.on_startup.append(start_stream)
+    app.on_shutdown.append(stop_stream)
+    app.on_cleanup.append(stop_service)
+    app.router.add_get("/health", health)
+    app.router.add_get("/status", status)
+    app.router.add_get("/frame", frame)
+    app.router.add_get("/state", state)
+    app.router.add_get("/game-stream", game_stream)
+    app.router.add_post("/load", load)
+    app.router.add_post("/load-state", load_state)
+    app.router.add_post("/input", apply_input)
+    return app
 
 
 def main() -> None:
+    from aiohttp import web
+
     port = int(os.environ.get("PORT", "8080"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-
-    def stop_server(_signal_number: int, _frame: object) -> None:
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, stop_server)
     print(json.dumps({"message": "emulator server started", "port": port}), flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-        EMULATOR.shutdown()
+    web.run_app(create_app(), host="0.0.0.0", port=port, access_log=None)
 
 
 if __name__ == "__main__":

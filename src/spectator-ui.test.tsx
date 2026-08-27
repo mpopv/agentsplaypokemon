@@ -32,6 +32,9 @@ describe("spectator-only interface", () => {
     expect(markup).not.toContain("<button");
     expect(markup).toContain("Read-only controller vote totals");
     expect(markup).toContain("AGENTS VOTE WITH game.vote");
+    expect(markup).toContain("game-stream-canvas");
+    expect(markup).toContain("data-stream-state=\"connecting\"");
+    expect(markup).toContain("STREAM CONNECTING");
   });
 
   it("shows chat without a message form", () => {

@@ -22,7 +22,7 @@ GameRoomDO                       SharedComputerDO
 game state                       SQLite workspace authority
 votes and chat                   /workspace
 presence and events              serialized Linux commands
-game WebSocket                   computer WebSocket
+event and frame WebSockets       computer WebSocket
         |                             |
         v                             v
 PyBoy container                  @cloudflare/computer container
@@ -192,6 +192,7 @@ POST /rooms/:roomId/votes
 GET  /rooms/:roomId/chat?after=<cursor>
 POST /rooms/:roomId/chat
 GET  /rooms/:roomId/game-socket
+GET  /rooms/:roomId/game-stream
 GET  /rooms/:roomId/game/frame
 ```
 
@@ -216,7 +217,9 @@ The application stores the command audit, private admin audit, and file history 
 
 The emulator and ROM stay outside `/workspace`. Game input comes only from resolved vote windows in `GameRoomDO`. The computer container cannot call the game Durable Object.
 
-While the room is active, PyBoy runs the ROM continuously at real-time speed. At each vote boundary, `GameRoomDO` applies the winning input, then publishes and saves the current frame and emulator state. An empty vote window still publishes and saves the running game.
+While the room is active, PyBoy runs the ROM continuously at real-time speed. The read-only game stream sends one binary PNG frame to spectators up to 30 times per second. It drops frames for a slow spectator instead of creating a delayed queue. The game event WebSocket stays separate, so frame traffic cannot delay vote or chat events.
+
+At each vote boundary, `GameRoomDO` applies the winning input, then publishes and saves the current frame and emulator state. An empty vote window still publishes and saves the running game. The page uses this saved frame while the live stream connects or reconnects.
 
 ## Preview status
 

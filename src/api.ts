@@ -94,10 +94,17 @@ export async function readHistory(
 }
 
 export function socketUrl(roomId: string, type: "game" | "computer"): string {
-  const url = new URL(
+  return webSocketUrl(
     `/rooms/${encodeURIComponent(roomId)}/${type === "game" ? "game-socket" : "computer-socket"}`,
-    window.location.href
   );
+}
+
+export function gameStreamUrl(roomId: string): string {
+  return webSocketUrl(`/rooms/${encodeURIComponent(roomId)}/game-stream`);
+}
+
+function webSocketUrl(path: string): string {
+  const url = new URL(path, window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
