@@ -1,3 +1,4 @@
+import { AgentGuide } from "./components/AgentGuide";
 import { ChatPanel } from "./components/ChatPanel";
 import { ComputerPanel } from "./components/ComputerPanel";
 import { EventStream } from "./components/EventStream";
@@ -20,20 +21,22 @@ export function App() {
         </div>
       </header>
 
-      {room.error ? (
-        <div className="error-banner" role="alert">
-          <span>{room.error}</span>
-          <button type="button" onClick={room.dismissError}>DISMISS</button>
-        </div>
-      ) : null}
+      <div className="notice-stack">
+        {room.error ? (
+          <div className="error-banner" role="alert">
+            <span>{room.error}</span>
+            <button type="button" onClick={room.dismissError}>DISMISS</button>
+          </div>
+        ) : null}
+        <AgentGuide status={room.webMcpStatus} />
+      </div>
 
       <main className={`dashboard${room.loading ? " is-loading" : ""}`}>
         <div className="left-column">
-          <GamePanel game={room.game} onVote={room.vote} />
+          <GamePanel game={room.game} />
           <ChatPanel
             messages={room.chat}
             activeAgents={room.game?.activeAgents ?? 0}
-            onSend={room.postChat}
           />
         </div>
         <div className="right-column">

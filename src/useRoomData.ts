@@ -7,7 +7,6 @@ import type {
   ComputerFileView,
   ComputerOverview,
   ComputerTreeEntry,
-  GameInput,
   GameObservation,
   SessionInfo,
   SocketEnvelope
@@ -20,10 +19,8 @@ import {
   readFile,
   readHistory,
   readTree,
-  sendChat,
   socketUrl,
-  startSession,
-  submitVote
+  startSession
 } from "./api";
 import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
@@ -213,33 +210,6 @@ export function useRoomData() {
     return registerRoomTools(session.roomId, setWebMcpStatus, refreshAll);
   }, [refreshAll, session]);
 
-  const vote = useCallback(
-    async (input: GameInput) => {
-      if (!session) return;
-      try {
-        setGame(await submitVote(session.roomId, input));
-      } catch (cause) {
-        setError(messageOf(cause));
-      }
-    },
-    [session]
-  );
-
-  const postChat = useCallback(
-    async (message: string) => {
-      if (!session) return;
-      try {
-        const created = await sendChat(session.roomId, message);
-        chatCursor.current = Math.max(chatCursor.current, created.sequence);
-        setChat((current) => appendUnique(current, [created], (item) => item.sequence, 160));
-      } catch (cause) {
-        setError(messageOf(cause));
-        throw cause;
-      }
-    },
-    [session]
-  );
-
   const toggleDirectory = useCallback(
     (path: string) => {
       setExpandedPaths((current) => {
@@ -275,8 +245,6 @@ export function useRoomData() {
     webMcpStatus,
     error,
     loading,
-    vote,
-    postChat,
     toggleDirectory,
     selectFile,
     dismissError: () => setError(null)

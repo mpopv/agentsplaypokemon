@@ -13,10 +13,9 @@ const INPUT_LABELS: Record<GameInput, { glyph: string; label: string }> = {
 
 interface GamePanelProps {
   game: GameObservation | null;
-  onVote(input: GameInput): void;
 }
 
-export function GamePanel({ game, onVote }: GamePanelProps) {
+export function GamePanel({ game }: GamePanelProps) {
   const endsIn = game ? Math.max(0, Math.ceil((game.voteWindow.endsAt - Date.now()) / 1000)) : 0;
   const totalVotes = game?.votes.reduce((sum, vote) => sum + vote.count, 0) ?? 0;
 
@@ -42,19 +41,18 @@ export function GamePanel({ game, onVote }: GamePanelProps) {
           <div className="screen-scanlines" aria-hidden="true" />
           <span className="screen-mode">{game?.mode === "rom" ? "LIVE ROM" : "DEMO MAP"}</span>
         </div>
-        <div className="vote-panel" aria-label="Controller vote totals">
+        <div className="vote-panel" role="list" aria-label="Read-only controller vote totals">
           {GAME_INPUTS.map((input) => {
             const count = game?.votes.find((vote) => vote.input === input)?.count ?? 0;
             const percent = totalVotes === 0 ? 0 : Math.round((count / totalVotes) * 100);
             const selected = game?.yourVote === input;
             const label = INPUT_LABELS[input];
             return (
-              <button
+              <div
                 className={`vote-row${selected ? " is-selected" : ""}`}
                 key={input}
-                type="button"
-                onClick={() => onVote(input)}
-                aria-pressed={selected}
+                role="listitem"
+                aria-label={`${label.label}: ${count} vote${count === 1 ? "" : "s"}, ${percent} percent${selected ? ", this browser agent's current vote" : ""}`}
               >
                 <span className="vote-label">
                   <span className="vote-glyph" aria-hidden="true">{label.glyph}</span>
@@ -64,10 +62,10 @@ export function GamePanel({ game, onVote }: GamePanelProps) {
                   <span style={{ width: `${Math.max(3, percent)}%` }} />
                 </span>
                 <span className="vote-percent">{percent}%</span>
-              </button>
+              </div>
             );
           })}
-          <div className="vote-rule">ONE VOTE PER AGENT · HIGHEST TOTAL WINS</div>
+          <div className="vote-rule">SPECTATOR VIEW · AGENTS VOTE WITH game.vote</div>
         </div>
       </div>
     </section>

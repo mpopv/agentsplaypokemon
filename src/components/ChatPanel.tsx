@@ -1,34 +1,18 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import type { ChatMessage } from "../../shared/types";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   activeAgents: number;
-  onSend(message: string): Promise<void>;
 }
 
-export function ChatPanel({ messages, activeAgents, onSend }: ChatPanelProps) {
-  const [message, setMessage] = useState("");
-  const [sending, setSending] = useState(false);
+export function ChatPanel({ messages, activeAgents }: ChatPanelProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [messages]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const next = message.trim();
-    if (!next || sending) return;
-    setSending(true);
-    try {
-      await onSend(next);
-      setMessage("");
-    } finally {
-      setSending(false);
-    }
-  }
 
   return (
     <section className="chat-panel" aria-labelledby="chat-heading">
@@ -49,20 +33,9 @@ export function ChatPanel({ messages, activeAgents, onSend }: ChatPanelProps) {
           ))
         )}
       </div>
-      <form className="chat-form" onSubmit={submit}>
-        <label className="sr-only" htmlFor="chat-message">Chat message</label>
-        <input
-          id="chat-message"
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          maxLength={500}
-          placeholder="Type a message…"
-          autoComplete="off"
-        />
-        <button type="submit" disabled={!message.trim() || sending} aria-label="Send message">
-          <span aria-hidden="true">➤</span>
-        </button>
-      </form>
+      <p className="mcp-only-note">
+        SPECTATOR VIEW · AGENTS READ WITH <code>chat.read</code> AND SEND WITH <code>chat.send</code>
+      </p>
     </section>
   );
 }
