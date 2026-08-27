@@ -122,13 +122,14 @@ export function LiveGameScreen({ roomId, frameUrl, alt, mode }: LiveGameScreenPr
   return (
     <div className="game-screen-media" data-stream-state={streamState}>
       <img className="game-screen game-frame-fallback" src={frameUrl} alt={alt} />
-      <canvas
-        ref={canvasRef}
-        className={`game-screen game-stream-canvas${live ? " is-live" : ""}`}
-        width="160"
-        height="144"
-        aria-hidden="true"
-      />
+      <div className={`game-stream-layer${live ? " is-live" : ""}`} aria-hidden="true">
+        <canvas
+          ref={canvasRef}
+          className="game-screen game-stream-canvas"
+          width="160"
+          height="144"
+        />
+      </div>
       <span className="screen-mode">{streamLabel(mode, streamState)}</span>
     </div>
   );
