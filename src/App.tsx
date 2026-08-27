@@ -34,12 +34,6 @@ export function App() {
       <main className={`dashboard${room.loading ? " is-loading" : ""}`}>
         <div className="left-column">
           <GamePanel game={room.game} />
-          <ChatPanel
-            messages={room.chat}
-            activeAgents={room.game?.activeAgents ?? 0}
-          />
-        </div>
-        <div className="right-column">
           <ComputerPanel
             treeByPath={room.treeByPath}
             expandedPaths={room.expandedPaths}
@@ -49,6 +43,12 @@ export function App() {
             revision={room.computer?.filesystemRevision ?? 0}
             onToggle={room.toggleDirectory}
             onSelect={room.selectFile}
+          />
+        </div>
+        <div className="right-column">
+          <ChatPanel
+            messages={room.chat}
+            activeAgents={room.game?.activeAgents ?? 0}
           />
           <EventStream events={room.computerEvents} live={room.computerSocket === "open"} />
         </div>
