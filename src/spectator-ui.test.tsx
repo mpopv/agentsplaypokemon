@@ -2,7 +2,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { GAME_INPUTS, type GameObservation } from "../shared/types";
-import { AgentGuide } from "./components/AgentGuide";
 import { ChatPanel } from "./components/ChatPanel";
 import { GamePanel } from "./components/GamePanel";
 import { parsePartyMessage } from "./components/LiveGameScreen";
@@ -55,17 +54,6 @@ describe("spectator-only interface", () => {
     expect(markup).not.toContain("<button");
     expect(markup).toContain("chat.read");
     expect(markup).toContain("chat.send");
-  });
-
-  it("gives agents the complete MCP-only play loop", () => {
-    const markup = renderToStaticMarkup(<AgentGuide status="available" />);
-
-    expect(markup).toContain("THIS PAGE IS A READ-ONLY SPECTATOR VIEW");
-    expect(markup).toContain("SITE TOOLS READY");
-    expect(markup).toContain("15-second window");
-    for (const tool of ["game.observe", "game.vote", "chat.read", "chat.send", "computer.exec"]) {
-      expect(markup).toContain(tool);
-    }
   });
 
   it("shows all six party slots with live Pokémon details", () => {

@@ -52,39 +52,10 @@ button { color: inherit; }
 .error-banner button { border: 0; background: none; color: inherit; cursor: pointer; }
 .notice-stack { display: grid; }
 
-.agent-guide {
-  position: relative;
-  isolation: isolate;
-  display: grid;
-  grid-template-columns: minmax(300px, 1.05fr) minmax(390px, 1.25fr) minmax(250px, .8fr);
-  gap: 24px;
-  align-items: center;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(90deg, rgba(184,255,54,.07), rgba(83,217,237,.025) 58%, transparent);
-}
-.agent-guide::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: repeating-linear-gradient(135deg, #efbd2f 0 14px, #050606 14px 28px);
-  opacity: .1;
-  pointer-events: none;
-}
-.agent-guide-kicker { color: var(--acid); font-size: .68rem; letter-spacing: .11em; }
-.agent-guide h2 { margin: 5px 0 4px; font-size: .92rem; font-weight: 600; letter-spacing: .025em; }
-.agent-guide p { margin: 0; color: #b9c0c2; font-size: .7rem; line-height: 1.45; }
-.agent-steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 22px; margin: 0; padding-left: 23px; color: #c7cccd; font-size: .69rem; line-height: 1.4; }
-.agent-steps li::marker { color: var(--acid); }
-.agent-guide code { color: var(--cyan); font: inherit; }
-.agent-tools { min-width: 0; display: grid; gap: 8px; }
 .agent-tool-status { width: fit-content; padding: 4px 7px; border: 1px solid currentColor; font-size: .62rem; letter-spacing: .05em; }
 .agent-tool-status.is-ready { color: var(--acid); }
 .agent-tool-status.is-waiting { color: var(--amber); }
 .agent-tool-status.is-error { color: var(--red); }
-.agent-tools > div { display: flex; flex-wrap: wrap; gap: 5px; }
-.agent-tools > div code { padding: 3px 6px; border: 1px solid var(--line); background: rgba(0,0,0,.2); font-size: .62rem; }
 
 .dashboard { min-height: 0; display: grid; grid-template-rows: minmax(0, 58fr) 150px minmax(0, 42fr); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 .dashboard.is-loading { opacity: .82; }
@@ -254,7 +225,6 @@ button { color: inherit; }
   .top-bar { min-height: 60px; }
   .room-stats > span { padding: 0 12px; }
   .room-stats > span:nth-child(3) { display: none; }
-  .agent-guide { grid-template-columns: 1fr; gap: 12px; }
   .dashboard { display: block; border: 0; }
   .dashboard-row { display: block; }
   .dashboard-row > :first-child { border-right: 0; }
@@ -276,8 +246,6 @@ button { color: inherit; }
   .room-stats { width: 100%; overflow-x: auto; }
   .room-stats > span:first-child { border-left: 0; padding-left: 0; }
   .room-stats > span:nth-child(4) { display: none; }
-  .agent-guide { padding: 14px 12px; }
-  .agent-steps { grid-template-columns: 1fr; }
   .game-area { min-height: 850px; grid-template-rows: 50px 1fr; }
   .game-grid { grid-template-columns: 1fr; grid-template-rows: 360px 1fr; padding: 0 10px 10px; }
   .pokemon-party-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

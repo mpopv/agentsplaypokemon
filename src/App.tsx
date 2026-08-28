@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
 import type { PokemonPartySnapshot } from "../shared/types";
-import { AgentGuide } from "./components/AgentGuide";
 import { ChatPanel } from "./components/ChatPanel";
 import { ComputerPanel } from "./components/ComputerPanel";
 import { EventStream } from "./components/EventStream";
@@ -37,7 +36,6 @@ export function App() {
             <button type="button" onClick={room.dismissError}>DISMISS</button>
           </div>
         ) : null}
-        <AgentGuide status={room.webMcpStatus} />
       </div>
 
       <main className={`dashboard${room.loading ? " is-loading" : ""}`}>
