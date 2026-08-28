@@ -83,6 +83,9 @@ export interface PokemonPartyMember {
   level: number;
   hp: number;
   maxHp: number;
+  experience: number;
+  xpEarnedThisLevel: number;
+  xpNeededThisLevel: number;
   status: PokemonStatus;
   active: boolean;
   fainted: boolean;

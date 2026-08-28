@@ -82,6 +82,9 @@ describe("spectator-only interface", () => {
               level: 18,
               hp: 37,
               maxHp: 45,
+              experience: 6200,
+              xpEarnedThisLevel: 368,
+              xpNeededThisLevel: 1027,
               status: "PAR",
               active: true,
               fainted: false
@@ -96,6 +99,10 @@ describe("spectator-only interface", () => {
     expect(markup).toContain("PIKACHU");
     expect(markup).toContain("LV 18");
     expect(markup).toContain("37/45");
+    expect(markup).toContain("659 TO NEXT");
+    expect(markup).toContain("pokemon-xp-meter");
+    expect(markup).toContain('aria-valuenow="368"');
+    expect(markup).toContain('aria-valuemax="1027"');
     expect(markup).toContain("PAR");
     expect(markup).toContain("generation-i/red-blue/25.png");
     expect(markup.match(/EMPTY PARTY SLOT/g)).toHaveLength(5);

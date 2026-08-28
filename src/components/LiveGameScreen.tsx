@@ -197,6 +197,13 @@ function isPartySnapshot(value: unknown): value is PokemonPartySnapshot {
       isIntegerInRange(member.hp, 0, 999) &&
       isIntegerInRange(member.maxHp, 1, 999) &&
       member.hp <= member.maxHp &&
+      isIntegerInRange(member.experience, 0, 0xffffff) &&
+      isIntegerInRange(member.xpEarnedThisLevel, 0, 0xffffff) &&
+      isIntegerInRange(member.xpNeededThisLevel, 0, 0xffffff) &&
+      member.xpEarnedThisLevel <= member.xpNeededThisLevel &&
+      (member.level === 100
+        ? member.xpEarnedThisLevel === 0 && member.xpNeededThisLevel === 0
+        : member.xpNeededThisLevel > 0) &&
       ["OK", "SLP", "PSN", "BRN", "FRZ", "PAR", "FNT"].includes(String(member.status)) &&
       typeof member.active === "boolean" &&
       typeof member.fainted === "boolean"

@@ -21,10 +21,10 @@ export function PokemonPartyPanel({ snapshot }: PokemonPartyPanelProps) {
       <div className="pokemon-party-grid">
         {slots.map((member, index) =>
           member ? (
-            <PartyCard member={member} key={member.slot} />
+            <PartyCard member={member} key={`slot-${member.slot}`} />
           ) : (
             <EmptyPartyCard
-              key={index}
+              key={`slot-${index + 1}`}
               slot={index + 1}
               waiting={snapshot === null || !snapshot.available}
             />
@@ -37,6 +37,11 @@ export function PokemonPartyPanel({ snapshot }: PokemonPartyPanelProps) {
 
 function PartyCard({ member }: { member: PokemonPartyMember }) {
   const hpPercent = Math.max(0, Math.min(100, (member.hp / member.maxHp) * 100));
+  const xpToNextLevel = member.xpNeededThisLevel - member.xpEarnedThisLevel;
+  const xpPercent =
+    member.level === 100
+      ? 100
+      : (member.xpEarnedThisLevel / member.xpNeededThisLevel) * 100;
   const hpTone = hpPercent <= 20 ? "danger" : hpPercent <= 50 ? "warning" : "healthy";
   const classes = [
     "pokemon-party-card",
@@ -49,7 +54,7 @@ function PartyCard({ member }: { member: PokemonPartyMember }) {
   return (
     <article
       className={classes}
-      aria-label={`Party slot ${member.slot}: ${member.nickname}, ${member.species}, level ${member.level}, ${member.hp} of ${member.maxHp} HP, status ${member.status}`}
+      aria-label={`Party slot ${member.slot}: ${member.nickname}, ${member.species}, level ${member.level}, ${member.hp} of ${member.maxHp} HP, status ${member.status}, ${member.level === 100 ? "maximum level" : `${xpToNextLevel} XP to next level`}`}
     >
       <div className="pokemon-card-header">
         <span>SLOT {String(member.slot).padStart(2, "0")}</span>
@@ -73,13 +78,31 @@ function PartyCard({ member }: { member: PokemonPartyMember }) {
           <b>LV {member.level}</b>
         </div>
       </div>
-      <div className="pokemon-hp">
-        <div className="pokemon-hp-label">
-          <span>HP</span>
-          <strong>{member.hp}/{member.maxHp}</strong>
+      <div className="pokemon-vitals">
+        <div className="pokemon-hp">
+          <div className="pokemon-meter-label">
+            <span>HP</span>
+            <strong>{member.hp}/{member.maxHp}</strong>
+          </div>
+          <div className="pokemon-hp-meter" aria-hidden="true">
+            <span className={`is-${hpTone}`} style={{ width: `${hpPercent}%` }} />
+          </div>
         </div>
-        <div className="pokemon-hp-meter" aria-hidden="true">
-          <span className={`is-${hpTone}`} style={{ width: `${hpPercent}%` }} />
+        <div className="pokemon-xp">
+          <div className="pokemon-meter-label">
+            <span>XP</span>
+            <strong>{member.level === 100 ? "MAX" : `${xpToNextLevel} TO NEXT`}</strong>
+          </div>
+          <div
+            className="pokemon-xp-meter"
+            role="progressbar"
+            aria-label={member.level === 100 ? "Maximum level" : "Experience to next level"}
+            aria-valuemin={0}
+            aria-valuemax={member.level === 100 ? 100 : member.xpNeededThisLevel}
+            aria-valuenow={member.level === 100 ? 100 : member.xpEarnedThisLevel}
+          >
+            <span style={{ width: `${xpPercent}%` }} />
+          </div>
         </div>
       </div>
     </article>

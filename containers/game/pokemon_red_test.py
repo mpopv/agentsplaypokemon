@@ -13,7 +13,16 @@ class PokemonRedPartyTest(unittest.TestCase):
 
     def test_reads_party_identity_stats_and_nickname(self) -> None:
         memory = make_memory()
-        add_member(memory, 0, 0x54, "SPARKY", level=18, hp=37, max_hp=45)
+        add_member(
+            memory,
+            0,
+            0x54,
+            "SPARKY",
+            level=18,
+            hp=37,
+            max_hp=45,
+            experience=6200,
+        )
 
         snapshot = pokemon_red.read_party(memory)
 
@@ -29,6 +38,9 @@ class PokemonRedPartyTest(unittest.TestCase):
                     "level": 18,
                     "hp": 37,
                     "maxHp": 45,
+                    "experience": 6200,
+                    "xpEarnedThisLevel": 368,
+                    "xpNeededThisLevel": 1027,
                     "status": "OK",
                     "active": False,
                     "fainted": False,
@@ -76,6 +88,25 @@ class PokemonRedPartyTest(unittest.TestCase):
         self.assertEqual(pokemon_red.SPECIES_BY_INTERNAL_ID[0x99], (1, "BULBASAUR"))
         self.assertEqual(pokemon_red.SPECIES_BY_INTERNAL_ID[0x15], (151, "MEW"))
 
+    def test_uses_the_pokemon_red_growth_rates(self) -> None:
+        self.assertEqual(pokemon_red._experience_for_level(25, 10), 1000)
+        self.assertEqual(pokemon_red._experience_for_level(4, 10), 560)
+        self.assertEqual(pokemon_red._experience_for_level(35, 10), 800)
+        self.assertEqual(pokemon_red._experience_for_level(58, 10), 1250)
+        self.assertEqual(pokemon_red._experience_for_level(151, 10), 560)
+
+        growth_groups = [
+            pokemon_red.FAST_GROWTH_POKEDEX_NUMBERS,
+            pokemon_red.MEDIUM_SLOW_GROWTH_POKEDEX_NUMBERS,
+            pokemon_red.SLOW_GROWTH_POKEDEX_NUMBERS,
+        ]
+        self.assertEqual([len(group) for group in growth_groups], [5, 40, 26])
+        self.assertEqual(len(set().union(*growth_groups)), sum(map(len, growth_groups)))
+        self.assertTrue(set().union(*growth_groups) <= set(range(1, 152)))
+
+    def test_caps_xp_progress_while_a_level_up_is_pending(self) -> None:
+        self.assertEqual(pokemon_red._experience_progress(25, 18, 7000), (1027, 1027))
+
 
 def make_memory() -> list[int]:
     memory = [0] * 0x10000
@@ -93,6 +124,7 @@ def add_member(
     hp: int,
     max_hp: int,
     status: int = 0,
+    experience: int | None = None,
 ) -> None:
     count = max(memory[pokemon_red.PARTY_COUNT_ADDRESS], index + 1)
     memory[pokemon_red.PARTY_COUNT_ADDRESS] = count
@@ -103,6 +135,15 @@ def add_member(
     memory[address] = species
     write_u16(memory, address + pokemon_red.MON_HP_OFFSET, hp)
     memory[address + pokemon_red.MON_STATUS_OFFSET] = status
+    write_u24(
+        memory,
+        address + pokemon_red.MON_EXP_OFFSET,
+        experience
+        if experience is not None
+        else pokemon_red._experience_for_level(
+            pokemon_red.SPECIES_BY_INTERNAL_ID[species][0], level
+        ),
+    )
     memory[address + pokemon_red.MON_LEVEL_OFFSET] = level
     write_u16(memory, address + pokemon_red.MON_MAX_HP_OFFSET, max_hp)
 
@@ -115,6 +156,12 @@ def add_member(
 def write_u16(memory: list[int], address: int, value: int) -> None:
     memory[address] = value >> 8
     memory[address + 1] = value & 0xFF
+
+
+def write_u24(memory: list[int], address: int, value: int) -> None:
+    memory[address] = value >> 16
+    memory[address + 1] = (value >> 8) & 0xFF
+    memory[address + 2] = value & 0xFF
 
 
 if __name__ == "__main__":

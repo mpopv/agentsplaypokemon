@@ -126,7 +126,7 @@ button { color: inherit; }
 
 .pokemon-party-panel { min-width: 0; min-height: 0; padding: 9px 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: linear-gradient(90deg, rgba(184,255,54,.035), rgba(83,217,237,.025)); }
 .pokemon-party-grid { height: 100%; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 7px; }
-.pokemon-party-card { min-width: 0; min-height: 0; position: relative; display: grid; grid-template-rows: 20px minmax(0, 1fr) 30px; gap: 3px; padding: 6px 8px 7px; overflow: hidden; border: 1px solid var(--line); background: linear-gradient(145deg, #121819, #0b0f10); }
+.pokemon-party-card { min-width: 0; min-height: 0; position: relative; display: grid; grid-template-rows: 20px minmax(0, 1fr) auto; gap: 3px; padding: 6px 8px 7px; overflow: hidden; border: 1px solid var(--line); background: linear-gradient(145deg, #121819, #0b0f10); }
 .pokemon-party-card.is-active { border-color: var(--acid); box-shadow: inset 0 0 0 1px rgba(184,255,54,.15), 0 0 9px rgba(184,255,54,.08); }
 .pokemon-party-card.is-fainted { border-color: #663337; }
 .pokemon-card-header { min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .57rem; letter-spacing: .045em; white-space: nowrap; }
@@ -145,14 +145,16 @@ button { color: inherit; }
 .pokemon-identity strong { color: var(--ink); font-size: .76rem; font-weight: 600; }
 .pokemon-identity span { color: var(--muted); font-size: .57rem; }
 .pokemon-identity b { color: var(--cyan); font-size: .61rem; font-weight: 500; }
-.pokemon-hp { min-width: 0; display: grid; gap: 4px; align-content: end; }
-.pokemon-hp-label { display: flex; justify-content: space-between; gap: 5px; color: var(--muted); font-size: .58rem; }
-.pokemon-hp-label strong { color: #d6dada; font-weight: 500; }
-.pokemon-hp-meter { height: 6px; overflow: hidden; background: #2a3031; }
-.pokemon-hp-meter > span { display: block; height: 100%; }
+.pokemon-vitals { min-width: 0; display: grid; gap: 4px; align-content: end; }
+.pokemon-hp, .pokemon-xp { min-width: 0; display: grid; gap: 3px; }
+.pokemon-meter-label { display: flex; justify-content: space-between; gap: 5px; color: var(--muted); font-size: .58rem; }
+.pokemon-meter-label strong { color: #d6dada; font-weight: 500; }
+.pokemon-hp-meter, .pokemon-xp-meter { height: 6px; overflow: hidden; background: #2a3031; }
+.pokemon-hp-meter > span, .pokemon-xp-meter > span { display: block; height: 100%; }
 .pokemon-hp-meter .is-healthy { background: var(--acid); }
 .pokemon-hp-meter .is-warning { background: var(--amber); }
 .pokemon-hp-meter .is-danger { background: var(--red); }
+.pokemon-xp-meter > span { background: linear-gradient(90deg, #934dff, #c17aff); }
 .pokemon-party-card.is-empty { grid-template-rows: 20px 1fr auto; place-items: center; padding-bottom: 12px; border-style: dashed; color: #626a6c; background: rgba(9,12,13,.5); font-size: .57rem; letter-spacing: .04em; text-align: center; }
 .pokemon-party-card.is-empty .pokemon-card-header { width: 100%; }
 .empty-party-mark { align-self: end; color: #394043; font-size: 2rem; line-height: 1; }

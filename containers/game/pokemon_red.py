@@ -19,6 +19,7 @@ BATTLE_MON_ADDRESS = 0xD014
 
 MON_HP_OFFSET = 1
 MON_STATUS_OFFSET = 4
+MON_EXP_OFFSET = 14
 MON_LEVEL_OFFSET = 33
 MON_MAX_HP_OFFSET = 34
 
@@ -34,6 +35,33 @@ class PartyDataError(ValueError):
 
 class MemoryView(Protocol):
     def __getitem__(self, key: int | slice) -> int | list[int]: ...
+
+
+FAST_GROWTH_POKEDEX_NUMBERS = frozenset({35, 36, 39, 40, 113})
+MEDIUM_SLOW_GROWTH_POKEDEX_NUMBERS = frozenset(
+    [
+        *range(1, 10),
+        *range(16, 19),
+        *range(29, 35),
+        *range(43, 46),
+        *range(60, 72),
+        *range(74, 77),
+        *range(92, 95),
+        151,
+    ]
+)
+SLOW_GROWTH_POKEDEX_NUMBERS = frozenset(
+    [
+        *range(58, 60),
+        *range(72, 74),
+        *range(90, 92),
+        *range(102, 104),
+        *range(111, 113),
+        *range(120, 122),
+        *range(127, 132),
+        *range(142, 151),
+    ]
+)
 
 
 SPECIES_BY_INTERNAL_ID = {
@@ -243,6 +271,7 @@ def read_party(memory: MemoryView) -> dict[str, Any]:
 
         hp = _u16(memory, address + MON_HP_OFFSET)
         max_hp = _u16(memory, address + MON_MAX_HP_OFFSET)
+        experience = _u24(memory, address + MON_EXP_OFFSET)
         level = _byte(memory, address + MON_LEVEL_OFFSET)
         raw_status = _byte(memory, address + MON_STATUS_OFFSET)
         _validate_stats(hp, max_hp, level)
@@ -252,6 +281,9 @@ def read_party(memory: MemoryView) -> dict[str, Any]:
         pokedex_number, species_name = species
         if not nickname:
             nickname = species_name
+        xp_earned_this_level, xp_needed_this_level = _experience_progress(
+            pokedex_number, level, experience
+        )
 
         party.append(
             {
@@ -262,6 +294,9 @@ def read_party(memory: MemoryView) -> dict[str, Any]:
                 "level": level,
                 "hp": hp,
                 "maxHp": max_hp,
+                "experience": experience,
+                "xpEarnedThisLevel": xp_earned_this_level,
+                "xpNeededThisLevel": xp_needed_this_level,
                 "status": decode_status(raw_status, hp),
                 "active": False,
                 "fainted": hp == 0,
@@ -328,11 +363,16 @@ def _apply_battle_overlay(
     _validate_stats(hp, max_hp, level)
 
     member = party[active_index]
+    xp_earned_this_level, xp_needed_this_level = _experience_progress(
+        member["pokedexNumber"], level, member["experience"]
+    )
     member.update(
         {
             "hp": hp,
             "maxHp": max_hp,
             "level": level,
+            "xpEarnedThisLevel": xp_earned_this_level,
+            "xpNeededThisLevel": xp_needed_this_level,
             "status": decode_status(raw_status, hp),
             "active": True,
             "fainted": hp == 0,
@@ -345,6 +385,32 @@ def _validate_stats(hp: int, max_hp: int, level: int) -> None:
         raise PartyDataError("party HP is invalid")
     if level < 1 or level > 100:
         raise PartyDataError("party level is invalid")
+
+
+def _experience_progress(
+    pokedex_number: int, level: int, experience: int
+) -> tuple[int, int]:
+    level_start = _experience_for_level(pokedex_number, level)
+    if experience < level_start:
+        raise PartyDataError("party experience is invalid")
+    if level == 100:
+        return 0, 0
+
+    next_level = _experience_for_level(pokedex_number, level + 1)
+    needed = next_level - level_start
+    earned = min(experience - level_start, needed)
+    return earned, needed
+
+
+def _experience_for_level(pokedex_number: int, level: int) -> int:
+    cubed = level**3
+    if pokedex_number in FAST_GROWTH_POKEDEX_NUMBERS:
+        return 4 * cubed // 5
+    if pokedex_number in MEDIUM_SLOW_GROWTH_POKEDEX_NUMBERS:
+        return max(0, 6 * cubed // 5 - 15 * level**2 + 100 * level - 140)
+    if pokedex_number in SLOW_GROWTH_POKEDEX_NUMBERS:
+        return 5 * cubed // 4
+    return cubed
 
 
 def _byte(memory: MemoryView, address: int) -> int:
@@ -365,3 +431,11 @@ def _bytes(memory: MemoryView, address: int, length: int) -> list[int]:
 
 def _u16(memory: MemoryView, address: int) -> int:
     return (_byte(memory, address) << 8) | _byte(memory, address + 1)
+
+
+def _u24(memory: MemoryView, address: int) -> int:
+    return (
+        (_byte(memory, address) << 16)
+        | (_byte(memory, address + 1) << 8)
+        | _byte(memory, address + 2)
+    )
