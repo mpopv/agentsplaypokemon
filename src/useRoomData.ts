@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   ChatMessage,
@@ -25,13 +25,15 @@ import {
   readTree,
   sessionSocketProtocols,
   socketUrl,
-  getSession
+  startSession
 } from "./api";
 import { mergeBySequence } from "./lib/sequence";
 import { parseGameSocketEvent } from "./lib/game-socket";
-import { getWebMcpStatus, subscribeWebMcpStatus } from "./webmcp";
+import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
 type ConnectionState = "connecting" | "open" | "closed";
+
+let sessionRequest: Promise<SessionInfo> | undefined;
 
 export function useRoomData() {
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -54,11 +56,7 @@ export function useRoomData() {
   const [fileHistory, setFileHistory] = useState<ComputerFileHistoryEntry[]>([]);
   const [gameSocket, setGameSocket] = useState<ConnectionState>("connecting");
   const [computerSocket, setComputerSocket] = useState<ConnectionState>("connecting");
-  const webMcpStatus = useSyncExternalStore(
-    subscribeWebMcpStatus,
-    getWebMcpStatus,
-    getWebMcpStatus
-  );
+  const [webMcpStatus, setWebMcpStatus] = useState<WebMcpStatus>("registering");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const chatNewestCursor = useRef(0);
@@ -74,11 +72,13 @@ export function useRoomData() {
 
   useEffect(() => {
     let active = true;
-    void getSession()
+    sessionRequest ??= startSession();
+    void sessionRequest
       .then((value) => {
         if (active) setSession(value);
       })
       .catch((cause: unknown) => {
+        sessionRequest = undefined;
         if (active) setError(messageOf(cause));
       })
       .finally(() => {
@@ -262,6 +262,14 @@ export function useRoomData() {
     }
   }, [selectedPath, session]);
 
+  const refreshAll = useCallback(() => {
+    void refreshGame();
+    void refreshChat();
+    void refreshComputer();
+    void loadTree("/workspace");
+    void loadSelectedFile();
+  }, [loadSelectedFile, loadTree, refreshChat, refreshComputer, refreshGame]);
+
   useEffect(() => {
     if (!session) return;
     chatNewestCursor.current = 0;
@@ -399,6 +407,11 @@ export function useRoomData() {
       }
     );
   }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+    return registerRoomTools(session.roomId, setWebMcpStatus, refreshAll);
+  }, [refreshAll, session]);
 
   const toggleDirectory = useCallback(
     (path: string) => {

@@ -1,7 +1,6 @@
 import type { GameInput } from "../shared/types";
 import {
   execComputer,
-  getSession,
   observeGame,
   readChat,
   sendChat,
@@ -29,21 +28,18 @@ declare global {
 
 export type WebMcpStatus = "registering" | "available" | "unavailable" | "error";
 
-let registrationStarted = false;
-let webMcpStatus: WebMcpStatus = "registering";
-const statusListeners = new Set<() => void>();
-
-export function startRoomToolRegistration(): void {
-  if (registrationStarted) return;
-  registrationStarted = true;
-
+export function registerRoomTools(
+  roomId: string,
+  onStatus: (status: WebMcpStatus) => void,
+  onMutation: () => void
+): () => void {
   const modelContext = document.modelContext;
   if (!modelContext) {
-    setWebMcpStatus("unavailable");
-    return;
+    onStatus("unavailable");
+    return () => undefined;
   }
 
-  setWebMcpStatus("registering");
+  onStatus("registering");
   const controller = new AbortController();
   const registration = [
     modelContext.registerTool(
@@ -55,7 +51,6 @@ export function startRoomToolRegistration(): void {
         annotations: { readOnlyHint: true },
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
         async execute() {
-          const { roomId } = await getSession();
           return toolResult(await observeGame(roomId));
         }
       },
@@ -80,8 +75,8 @@ export function startRoomToolRegistration(): void {
           additionalProperties: false
         },
         async execute(arguments_) {
-          const { roomId } = await getSession();
           const observation = await submitVote(roomId, String(arguments_.input) as GameInput);
+          onMutation();
           return toolResult(observation);
         }
       },
@@ -105,7 +100,6 @@ export function startRoomToolRegistration(): void {
           additionalProperties: false
         },
         async execute(arguments_) {
-          const { roomId } = await getSession();
           const after = typeof arguments_.after === "number" ? arguments_.after : 0;
           return toolResult(await readChat(roomId, after));
         }
@@ -131,8 +125,8 @@ export function startRoomToolRegistration(): void {
           additionalProperties: false
         },
         async execute(arguments_) {
-          const { roomId } = await getSession();
           const message = await sendChat(roomId, String(arguments_.message));
+          onMutation();
           return toolResult(message);
         }
       },
@@ -162,12 +156,12 @@ export function startRoomToolRegistration(): void {
           additionalProperties: false
         },
         async execute(arguments_) {
-          const { roomId } = await getSession();
           const result = await execComputer(
             roomId,
             String(arguments_.command),
             typeof arguments_.cwd === "string" ? arguments_.cwd : "/workspace"
           );
+          onMutation();
           return toolResult(result);
         }
       },
@@ -176,25 +170,13 @@ export function startRoomToolRegistration(): void {
   ];
 
   void Promise.all(registration)
-    .then(() => setWebMcpStatus("available"))
+    .then(() => onStatus("available"))
     .catch(() => {
       controller.abort();
-      setWebMcpStatus("error");
+      onStatus("error");
     });
-}
 
-export function getWebMcpStatus(): WebMcpStatus {
-  return webMcpStatus;
-}
-
-export function subscribeWebMcpStatus(listener: () => void): () => void {
-  statusListeners.add(listener);
-  return () => statusListeners.delete(listener);
-}
-
-function setWebMcpStatus(status: WebMcpStatus): void {
-  webMcpStatus = status;
-  for (const listener of statusListeners) listener();
+  return () => controller.abort();
 }
 
 function toolResult(value: unknown): { content: Array<{ type: "text"; text: string }> } {
