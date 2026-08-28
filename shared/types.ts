@@ -60,6 +60,57 @@ export interface ChatHistoryPage {
   hasMore: boolean;
 }
 
+export interface AgentLastVote {
+  windowId: number;
+  input: GameInput;
+  createdAt: number;
+}
+
+export interface AgentLastChat {
+  message: string;
+  createdAt: number;
+}
+
+export interface AgentLastCommand {
+  command: string;
+  eventType: string;
+  exitCode: number | null;
+  filesystemRevision: number;
+  createdAt: number;
+}
+
+export interface GameAgentActivity {
+  displayName: string | null;
+  firstRecordedAt: number | null;
+  lastRecordedAt: number | null;
+  lastSeenAt: number | null;
+  online: boolean;
+  voteWindowCount: number;
+  chatMessageCount: number;
+  lastVote: AgentLastVote | null;
+  lastChat: AgentLastChat | null;
+}
+
+export interface ComputerAgentActivity {
+  displayName: string | null;
+  firstRecordedAt: number | null;
+  lastRecordedAt: number | null;
+  commandCount: number;
+  lastCommand: AgentLastCommand | null;
+}
+
+export interface AgentProfile extends AgentIdentity {
+  firstRecordedAt: number;
+  lastActiveAt: number;
+  online: boolean;
+  voteWindowCount: number;
+  chatMessageCount: number;
+  commandCount: number;
+  lastVote: AgentLastVote | null;
+  lastChat: AgentLastChat | null;
+  lastCommand: AgentLastCommand | null;
+}
+
 export interface GameObservation {
   roomId: string;
   mode: "demo" | "rom";

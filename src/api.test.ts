@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { observeGame, submitVote } from "./api";
+import { observeGame, readAgentProfile, submitVote } from "./api";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -33,5 +33,20 @@ describe("API request policy", () => {
 
     await expect(submitVote("main", "a")).rejects.toThrow("temporary failure");
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads an agent profile from its room-scoped endpoint", async () => {
+    const profile = {
+      agentId: "123e4567-e89b-42d3-a456-426614174000",
+      displayName: "Agent 1740"
+    };
+    const fetch = vi.fn().mockResolvedValue(Response.json(profile));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(readAgentProfile("main", profile.agentId)).resolves.toEqual(profile);
+    expect(fetch).toHaveBeenCalledWith(
+      `/rooms/main/agents/${profile.agentId}`,
+      expect.objectContaining({ credentials: "omit" })
+    );
   });
 });

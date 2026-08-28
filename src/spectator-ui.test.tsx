@@ -2,7 +2,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { GAME_INPUTS, type GameObservation } from "../shared/types";
+import { AgentProfileModal } from "./components/AgentProfileModal";
 import { ChatPanel } from "./components/ChatPanel";
+import { EventStream } from "./components/EventStream";
 import { GamePanel } from "./components/GamePanel";
 import { parsePartyMessage } from "./components/LiveGameScreen";
 import { PokemonPartyPanel } from "./components/PokemonPartyPanel";
@@ -46,6 +48,7 @@ describe("spectator-only interface", () => {
         hasMore={false}
         loadingOlder={false}
         onLoadOlder={async () => undefined}
+        onAgentOpen={() => undefined}
       />
     );
 
@@ -54,6 +57,59 @@ describe("spectator-only interface", () => {
     expect(markup).not.toContain("<button");
     expect(markup).toContain("chat.read");
     expect(markup).toContain("chat.send");
+  });
+
+  it("opens agent activity from names in spectator logs", () => {
+    const agentId = "123e4567-e89b-42d3-a456-426614174000";
+    const chatMarkup = renderToStaticMarkup(
+      <ChatPanel
+        messages={[{
+          sequence: 1,
+          agentId,
+          displayName: "Agent 1740",
+          message: "I will check the route.",
+          createdAt: Date.now()
+        }]}
+        activeAgents={1}
+        hasMore={false}
+        loadingOlder={false}
+        onLoadOlder={async () => undefined}
+        onAgentOpen={() => undefined}
+      />
+    );
+    const eventMarkup = renderToStaticMarkup(
+      <EventStream
+        events={[{
+          sequence: 1,
+          agentId,
+          displayName: "Agent 1740",
+          eventType: "exec.completed",
+          command: "git status",
+          exitCode: 0,
+          stdoutPreview: null,
+          stderrPreview: null,
+          filesystemRevision: 4,
+          createdAt: Date.now()
+        }]}
+        live
+        hasMore={false}
+        loadingOlder={false}
+        onLoadOlder={async () => undefined}
+        onAgentOpen={() => undefined}
+      />
+    );
+    const modalMarkup = renderToStaticMarkup(
+      <AgentProfileModal
+        roomId="main"
+        agent={{ agentId, displayName: "Agent 1740" }}
+        onDismiss={() => undefined}
+      />
+    );
+
+    expect(chatMarkup).toContain("Open activity for Agent 1740");
+    expect(eventMarkup).toContain("Open activity for Agent 1740");
+    expect(modalMarkup).toContain("AGENT ACTIVITY");
+    expect(modalMarkup).toContain("LOADING ACTIVITY");
   });
 
   it("shows all six party slots with live Pokémon details", () => {

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import type { PokemonPartySnapshot } from "../shared/types";
+import type { AgentIdentity, PokemonPartySnapshot } from "../shared/types";
+import { AgentProfileModal } from "./components/AgentProfileModal";
 import { ChatPanel } from "./components/ChatPanel";
 import { ComputerPanel } from "./components/ComputerPanel";
 import { EventStream } from "./components/EventStream";
@@ -12,6 +13,8 @@ import { useRoomData } from "./useRoomData";
 export function App() {
   const room = useRoomData();
   const [party, setParty] = useState<PokemonPartySnapshot | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<AgentIdentity | null>(null);
+  const openAgent = useCallback((agent: AgentIdentity) => setSelectedAgent(agent), []);
 
   useEffect(() => {
     setParty(null);
@@ -47,6 +50,7 @@ export function App() {
             hasMore={room.chatHasMore}
             loadingOlder={room.chatLoadingOlder}
             onLoadOlder={room.loadOlderChat}
+            onAgentOpen={openAgent}
           />
         </div>
         <PokemonPartyPanel snapshot={party} />
@@ -67,6 +71,7 @@ export function App() {
             hasMore={room.computerEventsHaveMore}
             loadingOlder={room.computerEventsLoadingOlder}
             onLoadOlder={room.loadOlderComputerEvents}
+            onAgentOpen={openAgent}
           />
         </div>
       </main>
@@ -77,6 +82,11 @@ export function App() {
         webMcpStatus={room.webMcpStatus}
         agents={room.game?.activeAgents ?? 0}
         mode={room.game?.mode}
+      />
+      <AgentProfileModal
+        roomId={room.session?.roomId}
+        agent={selectedAgent}
+        onDismiss={() => setSelectedAgent(null)}
       />
     </div>
   );

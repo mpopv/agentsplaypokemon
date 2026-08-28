@@ -3,6 +3,7 @@ import { Container } from "@cloudflare/containers";
 import {
   GAME_INPUTS,
   type AgentIdentity,
+  type GameAgentActivity,
   type ChatHistoryPage,
   type ChatMessage,
   type GameEvent,
@@ -60,6 +61,26 @@ interface ChatRow {
   agent_id: string;
   display_name: string;
   message: string;
+  created_at: number;
+}
+
+interface PresenceRow {
+  [key: string]: SqlStorageValue;
+  display_name: string;
+  last_seen: number;
+}
+
+interface ActivityAggregateRow {
+  [key: string]: SqlStorageValue;
+  count: number;
+  first_at: number | null;
+  last_at: number | null;
+}
+
+interface LastVoteRow {
+  [key: string]: SqlStorageValue;
+  window_id: number;
+  input: GameInput;
   created_at: number;
 }
 
@@ -242,6 +263,79 @@ export class GameRoomDO extends Container<Env> {
     return chat;
   }
 
+  agentActivity(
+    roomId: string,
+    viewer: AgentIdentity,
+    agentId: string
+  ): GameAgentActivity {
+    this.identify(roomId);
+    this.touchPresence(viewer);
+    const presence = this.ctx.storage.sql
+      .exec<PresenceRow>(
+        `SELECT display_name, last_seen
+         FROM presence
+         WHERE agent_id = ?`,
+        agentId
+      )
+      .toArray()[0];
+    const voteStats = this.ctx.storage.sql
+      .exec<ActivityAggregateRow>(
+        `SELECT COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+         FROM votes
+         WHERE agent_id = ?`,
+        agentId
+      )
+      .one();
+    const chatStats = this.ctx.storage.sql
+      .exec<ActivityAggregateRow>(
+        `SELECT COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+         FROM chat_messages
+         WHERE agent_id = ?`,
+        agentId
+      )
+      .one();
+    const lastVote = this.ctx.storage.sql
+      .exec<LastVoteRow>(
+        `SELECT window_id, input, created_at
+         FROM votes
+         WHERE agent_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        agentId
+      )
+      .toArray()[0];
+    const lastChat = this.ctx.storage.sql
+      .exec<ChatRow>(
+        `SELECT sequence, agent_id, display_name, message, created_at
+         FROM chat_messages
+         WHERE agent_id = ?
+         ORDER BY sequence DESC
+         LIMIT 1`,
+        agentId
+      )
+      .toArray()[0];
+
+    return {
+      displayName: presence?.display_name ?? lastChat?.display_name ?? null,
+      firstRecordedAt: minimumTimestamp(voteStats.first_at, chatStats.first_at),
+      lastRecordedAt: maximumTimestamp(voteStats.last_at, chatStats.last_at),
+      lastSeenAt: presence?.last_seen ?? null,
+      online: presence !== undefined && presence.last_seen >= Date.now() - PRESENCE_TTL_MS,
+      voteWindowCount: Number(voteStats.count),
+      chatMessageCount: Number(chatStats.count),
+      lastVote: lastVote
+        ? {
+            windowId: lastVote.window_id,
+            input: lastVote.input,
+            createdAt: lastVote.created_at
+          }
+        : null,
+      lastChat: lastChat
+        ? { message: lastChat.message, createdAt: lastChat.created_at }
+        : null
+    };
+  }
+
   frameDescriptor(roomId: string): {
     mode: "demo" | "rom";
     frameKey: string | null;
@@ -421,6 +515,7 @@ export class GameRoomDO extends Container<Env> {
         PRIMARY KEY (window_id, agent_id)
       );
       CREATE INDEX IF NOT EXISTS votes_window ON votes(window_id, input);
+      CREATE INDEX IF NOT EXISTS votes_agent ON votes(agent_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS chat_messages (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,6 +524,8 @@ export class GameRoomDO extends Container<Env> {
         message TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS chat_messages_agent
+        ON chat_messages(agent_id, sequence DESC);
 
       CREATE TABLE IF NOT EXISTS presence (
         agent_id TEXT PRIMARY KEY,
@@ -737,6 +834,16 @@ function mapChat(row: ChatRow): ChatMessage {
     message: row.message,
     createdAt: row.created_at
   };
+}
+
+function minimumTimestamp(...values: Array<number | null | undefined>): number | null {
+  const present = values.filter((value): value is number => value !== null && value !== undefined);
+  return present.length === 0 ? null : Math.min(...present);
+}
+
+function maximumTimestamp(...values: Array<number | null | undefined>): number | null {
+  const present = values.filter((value): value is number => value !== null && value !== undefined);
+  return present.length === 0 ? null : Math.max(...present);
 }
 
 async function expectContainerJson(response: Response, action: string): Promise<unknown> {

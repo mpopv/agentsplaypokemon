@@ -1,5 +1,6 @@
 import {
   AGENT_SESSION_PROTOCOL_PREFIX,
+  type AgentProfile,
   type ChatHistoryPage,
   type ChatMessage,
   type ComputerEventHistoryPage,
@@ -82,6 +83,17 @@ export async function sendChat(roomId: string, message: string): Promise<ChatMes
     method: "POST",
     body: JSON.stringify({ message })
   });
+}
+
+export async function readAgentProfile(
+  roomId: string,
+  agentId: string,
+  signal?: AbortSignal
+): Promise<AgentProfile> {
+  return api(
+    `/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(agentId)}`,
+    { signal }
+  );
 }
 
 export async function execComputer(
