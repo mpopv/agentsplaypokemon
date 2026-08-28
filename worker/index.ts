@@ -32,6 +32,7 @@ interface AppVariables {
 }
 
 const app = new Hono<{ Bindings: RuntimeEnv; Variables: AppVariables }>();
+const READINESS_TIMEOUT_MS = 3_000;
 
 app.use("*", async (context, next) => {
   await next();
@@ -47,14 +48,52 @@ app.use("*", async (context, next) => {
       "connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
       "form-action 'self'; frame-ancestors 'none'"
   );
-  if (context.req.path.startsWith("/api/") || context.req.path.startsWith("/rooms/")) {
+  if (
+    context.req.path === "/health" ||
+    context.req.path === "/ready" ||
+    context.req.path.startsWith("/api/") ||
+    context.req.path.startsWith("/rooms/")
+  ) {
     context.header("cache-control", "no-store");
   }
+  const versionId = context.env.WORKER_VERSION?.id;
+  if (versionId) context.header("x-worker-version", versionId);
 });
 
 app.get("/health", (context) =>
-  context.json({ ok: true, service: "agents-play-pokemon", time: Date.now() })
+  context.json({
+    ok: true,
+    service: "agents-play-pokemon",
+    version: context.env.WORKER_VERSION?.id ?? null,
+    time: Date.now()
+  })
 );
+
+app.get("/ready", async (context) => {
+  const startedAt = Date.now();
+  const roomId = parseRoomId(context.env.DEFAULT_ROOM_ID);
+  const checks = await Promise.all([
+    readinessCheck("game-room", () =>
+      context.env.GAME_ROOMS.getByName(roomId).readiness(roomId)
+    ),
+    readinessCheck("shared-computer", () =>
+      context.env.SHARED_COMPUTERS.getByName(roomId).readiness(roomId)
+    )
+  ]);
+  const ok = checks.every((check) => check.ok);
+  return context.json(
+    {
+      ok,
+      service: "agents-play-pokemon",
+      version: context.env.WORKER_VERSION?.id ?? null,
+      roomId,
+      durationMs: Date.now() - startedAt,
+      checks,
+      time: Date.now()
+    },
+    ok ? 200 : 503
+  );
+});
 
 app.post("/api/session", async (context) => {
   enforceSameOrigin(context.req.raw);
@@ -386,4 +425,39 @@ function readErrorStatus(error: unknown): number {
     return error.status;
   }
   return 500;
+}
+
+async function readinessCheck(
+  name: string,
+  check: () => Promise<unknown>
+): Promise<
+  | { name: string; ok: true; durationMs: number; detail: unknown }
+  | { name: string; ok: false; durationMs: number; error: string }
+> {
+  const startedAt = Date.now();
+  try {
+    const detail = await withDeadline(check(), READINESS_TIMEOUT_MS);
+    return { name, ok: true, durationMs: Date.now() - startedAt, detail };
+  } catch (cause) {
+    return {
+      name,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      error: cause instanceof Error ? cause.message : String(cause)
+    };
+  }
+}
+
+async function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("readiness check timed out")), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

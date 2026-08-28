@@ -8,7 +8,6 @@ import type {
   ComputerOverview,
   ComputerTreeEntry,
   GameObservation,
-  SessionInfo,
   SocketEnvelope
 } from "../shared/types";
 import {
@@ -22,18 +21,16 @@ import {
   readHistory,
   readTree,
   sessionSocketProtocols,
-  socketUrl,
-  startSession
+  socketUrl
 } from "./api";
+import { useSession } from "./hooks/useSession";
 import { mergeBySequence } from "./lib/sequence";
 import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
 type ConnectionState = "connecting" | "open" | "closed";
 
-let sessionRequest: Promise<SessionInfo> | undefined;
-
 export function useRoomData() {
-  const [session, setSession] = useState<SessionInfo | null>(null);
+  const { session, sessionError, sessionLoading, dismissSessionError } = useSession();
   const [game, setGame] = useState<GameObservation | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [chatHasMore, setChatHasMore] = useState(false);
@@ -53,7 +50,6 @@ export function useRoomData() {
   const [computerSocket, setComputerSocket] = useState<ConnectionState>("connecting");
   const [webMcpStatus, setWebMcpStatus] = useState<WebMcpStatus>("registering");
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const chatNewestCursor = useRef(0);
   const chatNextBefore = useRef<number | null>(null);
   const chatReady = useRef(false);
@@ -64,33 +60,28 @@ export function useRoomData() {
   const computerReady = useRef(false);
   const computerInitialRequest = useRef<Promise<void> | null>(null);
   const computerOlderRequest = useRef(false);
+  const gameRequest = useRef<Promise<void> | null>(null);
+  const chatRefreshRequest = useRef<Promise<void> | null>(null);
+  const computerRefreshRequest = useRef<Promise<void> | null>(null);
+  const treeRequests = useRef(new Map<string, Promise<void>>());
+  const selectedPathRef = useRef(selectedPath);
+  const selectedFileRequest = useRef<{ path: string; request: Promise<void> } | null>(null);
+  selectedPathRef.current = selectedPath;
 
-  useEffect(() => {
-    let active = true;
-    sessionRequest ??= startSession();
-    void sessionRequest
-      .then((value) => {
-        if (active) setSession(value);
-      })
-      .catch((cause: unknown) => {
-        sessionRequest = undefined;
-        if (active) setError(messageOf(cause));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const refreshGame = useCallback(async () => {
-    if (!session) return;
-    try {
-      setGame(await observeGame(session.roomId));
-    } catch (cause) {
-      reportNonAuthError(cause, setError);
-    }
+  const refreshGame = useCallback((): Promise<void> => {
+    if (!session) return Promise.resolve();
+    if (gameRequest.current) return gameRequest.current;
+    const request = (async () => {
+      try {
+        setGame(await observeGame(session.roomId));
+      } catch (cause) {
+        reportNonAuthError(cause, setError);
+      } finally {
+        gameRequest.current = null;
+      }
+    })();
+    gameRequest.current = request;
+    return request;
   }, [session]);
 
   const loadInitialChat = useCallback((): Promise<void> => {
@@ -146,38 +137,52 @@ export function useRoomData() {
     return request;
   }, [session]);
 
-  const refreshChat = useCallback(async () => {
-    if (!session) return;
-    if (!chatReady.current) {
-      await loadInitialChat();
-      return;
-    }
-    try {
-      const response = await readChat(session.roomId, chatNewestCursor.current);
-      chatNewestCursor.current = Math.max(chatNewestCursor.current, response.cursor);
-      setChat((current) => mergeBySequence(current, response.messages));
-    } catch (cause) {
-      reportNonAuthError(cause, setError);
-    }
+  const refreshChat = useCallback((): Promise<void> => {
+    if (!session) return Promise.resolve();
+    if (chatRefreshRequest.current) return chatRefreshRequest.current;
+    const request = (async () => {
+      if (!chatReady.current) {
+        await loadInitialChat();
+        return;
+      }
+      try {
+        const response = await readChat(session.roomId, chatNewestCursor.current);
+        chatNewestCursor.current = Math.max(chatNewestCursor.current, response.cursor);
+        setChat((current) => mergeBySequence(current, response.messages));
+      } catch (cause) {
+        reportNonAuthError(cause, setError);
+      }
+    })().finally(() => {
+      chatRefreshRequest.current = null;
+    });
+    chatRefreshRequest.current = request;
+    return request;
   }, [loadInitialChat, session]);
 
-  const refreshComputer = useCallback(async () => {
-    if (!session) return;
-    if (!computerReady.current) {
-      await loadInitialComputerEvents();
-      return;
-    }
-    try {
-      const response = await readComputer(session.roomId, computerNewestCursor.current);
-      setComputer(response);
-      computerNewestCursor.current = Math.max(
-        computerNewestCursor.current,
-        response.events.at(-1)?.sequence ?? 0
-      );
-      setComputerEvents((current) => mergeBySequence(current, response.events));
-    } catch (cause) {
-      reportNonAuthError(cause, setError);
-    }
+  const refreshComputer = useCallback((): Promise<void> => {
+    if (!session) return Promise.resolve();
+    if (computerRefreshRequest.current) return computerRefreshRequest.current;
+    const request = (async () => {
+      if (!computerReady.current) {
+        await loadInitialComputerEvents();
+        return;
+      }
+      try {
+        const response = await readComputer(session.roomId, computerNewestCursor.current);
+        setComputer(response);
+        computerNewestCursor.current = Math.max(
+          computerNewestCursor.current,
+          response.events.at(-1)?.sequence ?? 0
+        );
+        setComputerEvents((current) => mergeBySequence(current, response.events));
+      } catch (cause) {
+        reportNonAuthError(cause, setError);
+      }
+    })().finally(() => {
+      computerRefreshRequest.current = null;
+    });
+    computerRefreshRequest.current = request;
+    return request;
   }, [loadInitialComputerEvents, session]);
 
   const loadOlderChat = useCallback(async (): Promise<void> => {
@@ -227,34 +232,56 @@ export function useRoomData() {
   }, [session]);
 
   const loadTree = useCallback(
-    async (path: string) => {
-      if (!session) return;
-      try {
-        const response = await readTree(session.roomId, path);
-        setTreeByPath((current) => ({ ...current, [path]: response.entries }));
-      } catch (cause) {
-        reportNonAuthError(cause, setError);
-      }
+    (path: string): Promise<void> => {
+      if (!session) return Promise.resolve();
+      const current = treeRequests.current.get(path);
+      if (current) return current;
+      const request = (async () => {
+        try {
+          const response = await readTree(session.roomId, path);
+          setTreeByPath((value) => ({ ...value, [path]: response.entries }));
+        } catch (cause) {
+          reportNonAuthError(cause, setError);
+        } finally {
+          treeRequests.current.delete(path);
+        }
+      })();
+      treeRequests.current.set(path, request);
+      return request;
     },
     [session]
   );
 
-  const loadSelectedFile = useCallback(async () => {
-    if (!session || !selectedPath) return;
-    try {
-      const [file, history] = await Promise.all([
-        readFile(session.roomId, selectedPath),
-        readHistory(session.roomId, selectedPath)
-      ]);
-      setSelectedFile(file);
-      setFileHistory(history.history);
-    } catch (cause) {
-      setSelectedFile(null);
-      setFileHistory([]);
-      if (!(cause instanceof ApiError && cause.status === 404)) {
-        reportNonAuthError(cause, setError);
-      }
+  const loadSelectedFile = useCallback((): Promise<void> => {
+    if (!session || !selectedPath) return Promise.resolve();
+    if (selectedFileRequest.current?.path === selectedPath) {
+      return selectedFileRequest.current.request;
     }
+    const requestedPath = selectedPath;
+    const request = (async () => {
+      try {
+        const [file, history] = await Promise.all([
+          readFile(session.roomId, requestedPath),
+          readHistory(session.roomId, requestedPath)
+        ]);
+        if (requestedPath !== selectedPathRef.current) return;
+        setSelectedFile(file);
+        setFileHistory(history.history);
+      } catch (cause) {
+        if (requestedPath !== selectedPathRef.current) return;
+        setSelectedFile(null);
+        setFileHistory([]);
+        if (!(cause instanceof ApiError && cause.status === 404)) {
+          reportNonAuthError(cause, setError);
+        }
+      } finally {
+        if (selectedFileRequest.current?.path === requestedPath) {
+          selectedFileRequest.current = null;
+        }
+      }
+    })();
+    selectedFileRequest.current = { path: requestedPath, request };
+    return request;
   }, [selectedPath, session]);
 
   const refreshAll = useCallback(() => {
@@ -382,13 +409,16 @@ export function useRoomData() {
     gameSocket,
     computerSocket,
     webMcpStatus,
-    error,
-    loading,
+    error: sessionError ?? error,
+    loading: sessionLoading || game === null,
     loadOlderChat,
     loadOlderComputerEvents,
     toggleDirectory,
     selectFile,
-    dismissError: () => setError(null)
+    dismissError: () => {
+      dismissSessionError();
+      setError(null);
+    }
   };
 }
 

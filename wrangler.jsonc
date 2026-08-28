@@ -4,6 +4,9 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-08-26",
   "compatibility_flags": ["nodejs_compat"],
+  "version_metadata": {
+    "binding": "WORKER_VERSION"
+  },
   "workers_dev": true,
   "routes": [
     {
@@ -23,16 +26,16 @@
       "image": "./containers/game/Dockerfile",
       "instance_type": "basic",
       "max_instances": 10,
-      "rollout_active_grace_period": 0,
-      "rollout_step_percentage": [100]
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 50, 100]
     },
     {
       "class_name": "SharedComputerDO",
       "image": "./containers/computer/Dockerfile",
       "instance_type": "standard-2",
       "max_instances": 10,
-      "rollout_active_grace_period": 0,
-      "rollout_step_percentage": [100]
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 50, 100]
     }
   ],
   "durable_objects": {

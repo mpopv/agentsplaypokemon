@@ -140,6 +140,22 @@ export class SharedComputerDO extends withWorkspace(
     this.initializeSchema();
   }
 
+  readiness(roomId: string): {
+    ok: true;
+    roomId: string;
+    initialized: boolean;
+    filesystemRevision: number;
+  } {
+    this.identify(roomId);
+    const meta = this.readMeta();
+    return {
+      ok: true,
+      roomId,
+      initialized: meta.initialized === 1,
+      filesystemRevision: meta.filesystem_revision
+    };
+  }
+
   async exec(
     roomId: string,
     agent: AgentIdentity,

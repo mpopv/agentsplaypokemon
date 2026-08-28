@@ -14,8 +14,11 @@ import {
 } from "../shared/types";
 
 const TAB_SESSION_STORAGE_KEY = "agents_play_tab_session";
+const REQUEST_TIMEOUT_MS = 4_000;
+const RETRY_DELAY_MS = 200;
 
 let sessionToken: string | null = null;
+let sessionRequest: Promise<SessionInfo> | undefined;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -27,16 +30,12 @@ export class ApiError extends Error {
   }
 }
 
-export async function startSession(): Promise<SessionInfo> {
-  sessionToken = readStoredSessionToken();
-  const session = await api<SessionBootstrap>("/api/session", { method: "POST" });
-  sessionToken = session.token;
-  storeSessionToken(session.token);
-  return {
-    agentId: session.agentId,
-    displayName: session.displayName,
-    roomId: session.roomId
-  };
+export function getSession(): Promise<SessionInfo> {
+  sessionRequest ??= createSession().catch((cause: unknown) => {
+    sessionRequest = undefined;
+    throw cause;
+  });
+  return sessionRequest;
 }
 
 export async function observeGame(roomId: string): Promise<GameObservation> {
@@ -49,7 +48,7 @@ export async function readGameFrame(frameUrl: string): Promise<Blob> {
     throw new ApiError("frame URL must use the application origin", 400);
   }
   const headers = new Headers({ authorization: `Bearer ${requireSessionToken()}` });
-  const response = await fetch(url, { headers, credentials: "omit" });
+  const response = await request(url, { headers });
   if (!response.ok) {
     throw new ApiError(`frame request failed with ${response.status}`, response.status);
   }
@@ -162,11 +161,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined) headers.set("content-type", "application/json");
   if (sessionToken !== null) headers.set("authorization", `Bearer ${sessionToken}`);
-  const response = await fetch(path, {
-    ...init,
-    headers,
-    credentials: "omit"
-  });
+  const response = await request(path, { ...init, headers });
   const text = await response.text();
   let value: unknown = null;
   if (text) {
@@ -184,6 +179,84 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(message, response.status);
   }
   return value as T;
+}
+
+async function createSession(): Promise<SessionInfo> {
+  sessionToken = readStoredSessionToken();
+  const session = await api<SessionBootstrap>("/api/session", {
+    method: "POST",
+    headers: { "x-retry-safe": "session-bootstrap" }
+  });
+  sessionToken = session.token;
+  storeSessionToken(session.token);
+  return {
+    agentId: session.agentId,
+    displayName: session.displayName,
+    roomId: session.roomId
+  };
+}
+
+async function request(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+  const retrySafe = method === "GET" || headers.get("x-retry-safe") !== null;
+  headers.delete("x-retry-safe");
+  const attempts = retrySafe ? 2 : 1;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetchWithDeadline(input, {
+        ...init,
+        headers,
+        credentials: "omit"
+      });
+      if (attempt + 1 < attempts && isRetryableStatus(response.status)) {
+        await response.body?.cancel();
+        await retryDelay(attempt);
+        continue;
+      }
+      return response;
+    } catch (cause) {
+      if (init.signal?.aborted) throw cause;
+      if (attempt + 1 >= attempts) {
+        if (cause instanceof DOMException && cause.name === "AbortError") {
+          throw new ApiError("request timed out", 0);
+        }
+        throw cause;
+      }
+      await retryDelay(attempt);
+    }
+  }
+
+  throw new ApiError("request failed", 0);
+}
+
+async function fetchWithDeadline(
+  input: RequestInfo | URL,
+  init: RequestInit
+): Promise<Response> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(init.signal?.reason);
+  init.signal?.addEventListener("abort", abort, { once: true });
+  const timer = globalThis.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    globalThis.clearTimeout(timer);
+    init.signal?.removeEventListener("abort", abort);
+  }
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status === 500 ||
+    status === 502 || status === 504;
+}
+
+async function retryDelay(attempt: number): Promise<void> {
+  const jitter = Math.floor(Math.random() * 100);
+  await new Promise((resolve) =>
+    globalThis.setTimeout(resolve, RETRY_DELAY_MS * 2 ** attempt + jitter)
+  );
 }
 
 function readStoredSessionToken(): string | null {

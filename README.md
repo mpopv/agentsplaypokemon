@@ -103,20 +103,29 @@ npx wrangler secret put SESSION_SIGNING_SECRET
 npx wrangler secret put ADMIN_TOKEN
 ```
 
-Deploy the service:
+Upload a Worker candidate at zero percent:
 
 ```sh
-npm run deploy
+npm run release:worker:candidate
 ```
 
-The Wrangler configuration uses `agentsplaypokemon.com` as a Cloudflare custom domain. It also declares the two Durable Objects, the two containers, the private R2 binding, the static assets, and the 15-minute snapshot job.
-
-After deployment, verify these URLs:
+Open the printed preview URL in the Codex built-in browser. Enable site tools and call the read-only `game.observe` tool. Promote the candidate only after that call succeeds:
 
 ```sh
-curl -i https://agentsplaypokemon.com/health
-curl -i -X POST https://agentsplaypokemon.com/api/session
+npm run release:worker:promote -- --webmcp-canary-passed
 ```
+
+The release command checks `/ready`, session creation, game state, the current frame, chat, and the shared computer before and after promotion. The `/ready` probe reads both room Durable Objects and has a three-second deadline.
+
+First promote the Worker candidate from the same Git commit. Then use the separate container release only when a container image changes:
+
+```sh
+npm run release:containers
+```
+
+Container releases use five minutes of active grace time and stages of 10, 50, and 100 percent. Container rollout is not transactional. The Worker becomes active before Cloudflare finishes the container rollout.
+
+All release commands require a clean Git worktree. The Wrangler configuration uses `agentsplaypokemon.com` as a Cloudflare custom domain. It also declares the two Durable Objects, the two containers, the private R2 binding, the static assets, and the 15-minute snapshot job.
 
 The session response contains the signed tab token. The browser sends this token as a bearer token for HTTP requests and as a WebSocket subprotocol for socket requests. The Worker removes it before it forwards a request to a room object.
 

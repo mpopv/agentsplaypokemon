@@ -86,6 +86,22 @@ export class GameRoomDO extends Container<Env> {
     this.initializeSchema();
   }
 
+  readiness(roomId: string): {
+    ok: true;
+    roomId: string;
+    mode: "demo" | "rom";
+    frameRevision: number;
+  } {
+    this.identify(roomId);
+    const meta = this.readMeta();
+    return {
+      ok: true,
+      roomId,
+      mode: meta.mode,
+      frameRevision: meta.frame_revision
+    };
+  }
+
   async observe(roomId: string, agent: AgentIdentity): Promise<GameObservation> {
     this.identify(roomId);
     this.touchPresence(agent);
