@@ -5,10 +5,8 @@ import hashlib
 import io
 import json
 import os
-import struct
 import threading
 import time
-from array import array
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -30,10 +28,6 @@ FRAME_RATE = 60
 FRAME_INTERVAL_SECONDS = 1 / FRAME_RATE
 STREAM_FRAME_RATE = 30
 PARTY_SAMPLE_INTERVAL_SECONDS = 0.25
-AUDIO_SAMPLE_RATE = 48_000
-AUDIO_CHANNELS = 2
-AUDIO_FORMAT = "s8"
-AUDIO_PACKET_HEADER_BYTES = 4
 
 
 class BinarySocket(Protocol):
@@ -53,8 +47,6 @@ class Emulator:
         self.pyboy: PyBoy | None = None
         self.rom_sha256: str | None = None
         self.last_party_snapshot: dict[str, Any] | None = None
-        self.latest_audio_packet: tuple[int, bytes] | None = None
-        self.audio_sequence = 0
         self.pending_release: tuple[str, int] | None = None
         self.stopped = threading.Event()
         self.runner = threading.Thread(
@@ -70,18 +62,10 @@ class Emulator:
         with self.lock:
             if self.pyboy is not None:
                 self.pyboy.stop(save=False)
-            self.latest_audio_packet = None
             ROM_PATH.write_bytes(data)
-            self.pyboy = PyBoy(
-                str(ROM_PATH),
-                window="null",
-                sound_emulated=True,
-                sound_sample_rate=AUDIO_SAMPLE_RATE,
-                sound_volume=100,
-            )
+            self.pyboy = PyBoy(str(ROM_PATH), window="null")
             self.pyboy.set_emulation_speed(0)
             self.pyboy.tick(1, True)
-            self._capture_audio_locked(self.pyboy)
             self.pending_release = None
             self.rom_sha256 = hashlib.sha256(data).hexdigest()
             self.last_party_snapshot = None
@@ -130,7 +114,6 @@ class Emulator:
             source = io.BytesIO(data)
             self._require().load_state(source)
             self._require().tick(1, True)
-            self._capture_audio_locked(self._require())
             self.pending_release = None
             self.last_party_snapshot = None
 
@@ -145,10 +128,6 @@ class Emulator:
                 return self.last_party_snapshot or unavailable_party()
             self.last_party_snapshot = snapshot
             return snapshot
-
-    def audio_packet(self) -> tuple[int, bytes] | None:
-        with self.lock:
-            return self.latest_audio_packet
 
     def status(self) -> dict[str, str | bool | int | None]:
         with self.lock:
@@ -188,7 +167,6 @@ class Emulator:
                         next_frame_at = time.monotonic()
                         continue
                     pyboy.tick(1, True)
-                    self._capture_audio_locked(pyboy)
                     if self.pending_release is not None:
                         value, release_frame = self.pending_release
                         if pyboy.frame_count >= release_frame:
@@ -215,19 +193,6 @@ class Emulator:
         if self.pyboy is None:
             raise RuntimeError("no ROM is loaded")
         return self.pyboy
-
-    def _capture_audio_locked(self, pyboy: PyBoy) -> None:
-        raw_format = str(pyboy.sound.raw_buffer_format)
-        if raw_format != "b":
-            raise RuntimeError(f"unsupported PyBoy sound buffer format: {raw_format}")
-        head = int(pyboy.sound.raw_buffer_head)
-        if head <= 0:
-            return
-        pcm = array(raw_format, pyboy.sound.raw_buffer[:head]).tobytes()
-        if not pcm:
-            return
-        self.audio_sequence += 1
-        self.latest_audio_packet = (self.audio_sequence, pcm)
 
 
 class FrameBroadcaster:
@@ -406,135 +371,6 @@ class FrameBroadcaster:
             pass
 
 
-class AudioBroadcaster:
-    def __init__(self, emulator: Emulator, packet_rate: int = FRAME_RATE) -> None:
-        self.emulator = emulator
-        self.packet_interval_seconds = 1 / packet_rate
-        self.clients: set[BinarySocket] = set()
-        self.client_available = asyncio.Event()
-        self.send_tasks: dict[BinarySocket, tuple[asyncio.Task[None], int]] = {}
-        self.sent_sequences: dict[BinarySocket, int] = {}
-        self.producer: asyncio.Task[None] | None = None
-
-    def add(self, socket: BinarySocket) -> None:
-        self.clients.add(socket)
-        self.sent_sequences[socket] = -1
-        self.client_available.set()
-
-    async def remove(self, socket: BinarySocket) -> None:
-        self.clients.discard(socket)
-        if not self.clients:
-            self.client_available.clear()
-        self.sent_sequences.pop(socket, None)
-        entry = self.send_tasks.pop(socket, None)
-        task = entry[0] if entry is not None else None
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    async def start(self) -> None:
-        if self.producer is None or self.producer.done():
-            self.producer = asyncio.create_task(self._run(), name="game-audio-stream")
-
-    async def stop(self) -> None:
-        if self.producer is not None:
-            self.producer.cancel()
-            await asyncio.gather(self.producer, return_exceptions=True)
-            self.producer = None
-
-        tasks = [entry[0] for entry in self.send_tasks.values()]
-        self.send_tasks.clear()
-        self.sent_sequences.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        clients = list(self.clients)
-        self.clients.clear()
-        if clients:
-            await asyncio.gather(
-                *(client.close(code=1001, message=b"server stopping") for client in clients),
-                return_exceptions=True,
-            )
-
-    async def broadcast_once(self) -> bool:
-        ready: list[BinarySocket] = []
-        for client in tuple(self.clients):
-            entry = self.send_tasks.get(client)
-            if entry is not None and entry[0].done():
-                self._finish_send(client, entry[0], entry[1])
-            if client.closed:
-                self.clients.discard(client)
-                self.sent_sequences.pop(client, None)
-            elif client not in self.send_tasks:
-                ready.append(client)
-
-        if not ready or not self.emulator.status()["loaded"]:
-            return False
-        packet = self.emulator.audio_packet()
-        if packet is None:
-            return False
-        sequence, pcm = packet
-        payload = struct.pack(">I", sequence % (2**32)) + pcm
-        sent = False
-        for client in ready:
-            if self.sent_sequences.get(client, -1) >= sequence:
-                continue
-            task = asyncio.create_task(client.send_bytes(payload))
-            self.send_tasks[client] = (task, sequence)
-            task.add_done_callback(
-                lambda completed, socket=client, sent_sequence=sequence: self._finish_send(
-                    socket, completed, sent_sequence
-                )
-            )
-            sent = True
-        return sent
-
-    async def _run(self) -> None:
-        next_packet_at = asyncio.get_running_loop().time()
-        while True:
-            while not self.clients:
-                self.client_available.clear()
-                if self.clients:
-                    break
-                await self.client_available.wait()
-            next_packet_at = max(next_packet_at, asyncio.get_running_loop().time())
-            wait_seconds = next_packet_at - asyncio.get_running_loop().time()
-            if wait_seconds > 0:
-                await asyncio.sleep(wait_seconds)
-            await self.broadcast_once()
-            next_packet_at += self.packet_interval_seconds
-            if next_packet_at < asyncio.get_running_loop().time() - self.packet_interval_seconds:
-                next_packet_at = asyncio.get_running_loop().time()
-
-    def _finish_send(
-        self,
-        socket: BinarySocket,
-        task: asyncio.Task[None],
-        sequence: int,
-    ) -> None:
-        entry = self.send_tasks.get(socket)
-        if entry is None or entry[0] is not task:
-            return
-        self.send_tasks.pop(socket, None)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-            self.sent_sequences[socket] = sequence
-        except Exception:
-            self.clients.discard(socket)
-            self.sent_sequences.pop(socket, None)
-            asyncio.create_task(self._close_failed_socket(socket))
-
-    async def _close_failed_socket(self, socket: BinarySocket) -> None:
-        try:
-            await socket.close(code=1011, message=b"audio delivery failed")
-        except Exception:
-            pass
-
-
 EMULATOR = Emulator()
 
 
@@ -542,7 +378,6 @@ def create_app() -> Any:
     from aiohttp import WSMsgType, WSCloseCode, web
 
     broadcaster = FrameBroadcaster(EMULATOR)
-    audio_broadcaster = AudioBroadcaster(EMULATOR)
 
     def json_response(value: object, status: int = 200) -> Any:
         return web.json_response(
@@ -647,48 +482,11 @@ def create_app() -> Any:
             await broadcaster.remove(socket)
         return socket
 
-    async def audio_stream(request: Any) -> Any:
-        if request.headers.get("upgrade", "").lower() != "websocket":
-            return error_response(426, "websocket upgrade required")
-        if not EMULATOR.status()["loaded"]:
-            return error_response(409, "no ROM is loaded")
-
-        socket = web.WebSocketResponse(heartbeat=15, max_msg_size=1024, compress=False)
-        await socket.prepare(request)
-        await socket.send_str(
-            json.dumps(
-                {
-                    "type": "audio.config",
-                    "sampleRate": AUDIO_SAMPLE_RATE,
-                    "channels": AUDIO_CHANNELS,
-                    "format": AUDIO_FORMAT,
-                    "packetHeaderBytes": AUDIO_PACKET_HEADER_BYTES,
-                },
-                separators=(",", ":"),
-            )
-        )
-        audio_broadcaster.add(socket)
-        try:
-            async for message in socket:
-                if message.type in (WSMsgType.TEXT, WSMsgType.BINARY):
-                    await socket.close(
-                        code=WSCloseCode.POLICY_VIOLATION,
-                        message=b"audio stream is read only",
-                    )
-                    break
-                if message.type == WSMsgType.ERROR:
-                    break
-        finally:
-            await audio_broadcaster.remove(socket)
-        return socket
-
     async def start_stream(_app: Any) -> None:
         await broadcaster.start()
-        await audio_broadcaster.start()
 
     async def stop_stream(_app: Any) -> None:
         await broadcaster.stop()
-        await audio_broadcaster.stop()
 
     async def stop_service(_app: Any) -> None:
         EMULATOR.shutdown()
@@ -703,7 +501,6 @@ def create_app() -> Any:
     app.router.add_get("/frame", frame)
     app.router.add_get("/state", state)
     app.router.add_get("/game-stream", game_stream)
-    app.router.add_get("/audio-stream", audio_stream)
     app.router.add_post("/load", load)
     app.router.add_post("/load-state", load_state)
     app.router.add_post("/input", apply_input)

@@ -31,9 +31,7 @@ describe("spectator-only interface", () => {
   it("shows vote totals without clickable vote controls", () => {
     const markup = renderToStaticMarkup(<GamePanel game={game} />);
 
-    expect(markup).toContain("Turn game sound on");
-    expect(markup).toContain("SOUND OFF");
-    expect(markup).not.toContain("data-game-input");
+    expect(markup).not.toContain("<button");
     expect(markup).toContain("Read-only controller vote totals");
     expect(markup).toContain("AGENTS VOTE WITH game.vote");
     expect(markup).toContain("game-stream-canvas");
@@ -49,7 +47,6 @@ describe("spectator-only interface", () => {
         hasMore={false}
         loadingOlder={false}
         onLoadOlder={async () => undefined}
-        onAgentOpen={() => undefined}
       />
     );
 

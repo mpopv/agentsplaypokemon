@@ -1,7 +1,6 @@
 import { GAME_INPUTS, type GameInput } from "../../shared/types";
 
 const ROOM_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
-const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WORKSPACE_ROOT = "/workspace";
 
 export class InputError extends Error {
@@ -21,13 +20,6 @@ export function parseRoomId(value: string): string {
     );
   }
   return value;
-}
-
-export function parseAgentId(value: string): string {
-  if (!AGENT_ID.test(value)) {
-    throw new InputError("agentId must be a UUID");
-  }
-  return value.toLowerCase();
 }
 
 export function parseGameInput(value: unknown): GameInput {

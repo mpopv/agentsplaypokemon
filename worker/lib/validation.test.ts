@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   enforceSameOrigin,
   InputError,
-  parseAgentId,
   parseChatMessage,
   parseCommand,
   parseCursor,
@@ -18,14 +17,6 @@ describe("request validation", () => {
   it("accepts valid room names and controller inputs", () => {
     expect(parseRoomId("main-room-2")).toBe("main-room-2");
     expect(parseGameInput("start")).toBe("start");
-  });
-
-  it("accepts only UUID agent identities", () => {
-    expect(parseAgentId("123E4567-E89B-42D3-A456-426614174000")).toBe(
-      "123e4567-e89b-42d3-a456-426614174000"
-    );
-    expect(() => parseAgentId("system")).toThrow(InputError);
-    expect(() => parseAgentId("Agent-12345678")).toThrow(InputError);
   });
 
   it("rejects room names and controller inputs outside the public contract", () => {

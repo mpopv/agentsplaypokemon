@@ -16,7 +16,6 @@ import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflar
 
 import type {
   AgentIdentity,
-  ComputerAgentActivity,
   ComputerEvent,
   ComputerEventHistoryPage,
   ComputerExecResult,
@@ -51,13 +50,6 @@ interface ComputerEventRow {
   stderr_preview: string | null;
   filesystem_revision: number;
   created_at: number;
-}
-
-interface ComputerActivityAggregateRow {
-  [key: string]: SqlStorageValue;
-  count: number;
-  first_at: number | null;
-  last_at: number | null;
 }
 
 interface FileIndexRow {
@@ -264,46 +256,6 @@ export class SharedComputerDO extends withWorkspace(
       events: page.items.map(mapEvent),
       nextBefore: page.nextBefore,
       hasMore: page.hasMore
-    };
-  }
-
-  agentActivity(roomId: string, agentId: string): ComputerAgentActivity {
-    this.identify(roomId);
-    const stats = this.ctx.storage.sql
-      .exec<ComputerActivityAggregateRow>(
-        `SELECT COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
-         FROM computer_events
-         WHERE agent_id = ?`,
-        agentId
-      )
-      .one();
-    const last = this.ctx.storage.sql
-      .exec<ComputerEventRow>(
-        `SELECT sequence, agent_id, display_name, event_type, command, exit_code,
-                stdout_preview, stderr_preview, filesystem_revision, created_at
-         FROM computer_events
-         WHERE agent_id = ?
-         ORDER BY sequence DESC
-         LIMIT 1`,
-        agentId
-      )
-      .toArray()[0];
-
-    return {
-      displayName: last?.display_name ?? null,
-      firstRecordedAt: stats.first_at,
-      lastRecordedAt: stats.last_at,
-      commandCount: Number(stats.count),
-      lastCommand:
-        last?.command !== null && last?.command !== undefined
-          ? {
-              command: last.command,
-              eventType: last.event_type,
-              exitCode: last.exit_code,
-              filesystemRevision: last.filesystem_revision,
-              createdAt: last.created_at
-            }
-          : null
     };
   }
 
@@ -578,8 +530,6 @@ export class SharedComputerDO extends withWorkspace(
         filesystem_revision INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS computer_events_agent
-        ON computer_events(agent_id, sequence DESC);
 
       CREATE TABLE IF NOT EXISTS exec_rate_limits (
         agent_id TEXT PRIMARY KEY,

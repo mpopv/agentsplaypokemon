@@ -1,6 +1,5 @@
-import type { AgentIdentity, ComputerEvent } from "../../shared/types";
+import type { ComputerEvent } from "../../shared/types";
 import { useReverseInfiniteLog } from "../hooks/useReverseInfiniteLog";
-import { AgentName } from "./AgentName";
 
 interface EventStreamProps {
   events: ComputerEvent[];
@@ -8,7 +7,6 @@ interface EventStreamProps {
   hasMore: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<void>;
-  onAgentOpen: (agent: AgentIdentity) => void;
 }
 
 export function EventStream({
@@ -16,8 +14,7 @@ export function EventStream({
   live,
   hasMore,
   loadingOlder,
-  onLoadOlder,
-  onAgentOpen
+  onLoadOlder
 }: EventStreamProps) {
   const { logRef, newItemCount, scrollToLatest } = useReverseInfiniteLog({
     oldestSequence: events[0]?.sequence,
@@ -56,15 +53,7 @@ export function EventStream({
                 >
                   <span className="event-mark" aria-hidden="true" />
                   <time dateTime={new Date(event.createdAt).toISOString()}>{preciseClock(event.createdAt)}</time>
-                  {event.agentId === "system" ? (
-                    <strong>{event.displayName}</strong>
-                  ) : (
-                    <AgentName
-                      agentId={event.agentId}
-                      displayName={event.displayName}
-                      onOpen={onAgentOpen}
-                    />
-                  )}
+                  <strong>{event.displayName}</strong>
                   <div className="event-body">
                     <code>{event.command ?? event.eventType}</code>
                     {event.stdoutPreview ? <pre>{event.stdoutPreview}</pre> : null}

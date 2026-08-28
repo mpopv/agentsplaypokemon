@@ -2,36 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import struct
 import sys
 import tempfile
 import time
 import types
 import unittest
-from array import array
 from pathlib import Path
 
 
-class FakeSound:
-    raw_buffer_format = "b"
-    raw_buffer = array("b", [-16, 16, -8, 8, 0, 0])
-    raw_buffer_head = len(raw_buffer)
-
-
 class FakePyBoy:
-    def __init__(
-        self,
-        _rom_path: str,
-        window: str,
-        sound_emulated: bool,
-        sound_sample_rate: int,
-        sound_volume: int,
-    ) -> None:
+    def __init__(self, _rom_path: str, window: str) -> None:
         self.window = window
-        self.sound_emulated = sound_emulated
-        self.sound_sample_rate = sound_sample_rate
-        self.sound_volume = sound_volume
-        self.sound = FakeSound()
         self.frame_count = 0
         self.speed: int | None = None
         self.stopped = False
@@ -109,22 +90,6 @@ class EmulatorTest(unittest.TestCase):
             self.assertEqual(pyboy.button_events, ["press:a", "release:a"])
         self.assertEqual(result, {"input": "a", "frames": 12})
 
-    def test_captures_the_latest_stereo_audio_packet(self) -> None:
-        self.emulator.load_rom(b"test-rom")
-        with self.emulator.lock:
-            pyboy = self.emulator._require()
-            self.assertTrue(pyboy.sound_emulated)
-            self.assertEqual(pyboy.sound_sample_rate, server.AUDIO_SAMPLE_RATE)
-            self.assertEqual(pyboy.sound_volume, 100)
-            packet = self.emulator.audio_packet()
-
-        self.assertIsNotNone(packet)
-        if packet is None:
-            self.fail("audio packet is missing")
-        sequence, pcm = packet
-        self.assertGreater(sequence, 0)
-        self.assertEqual(pcm, FakeSound.raw_buffer.tobytes())
-
 
 class FakeFrameSource:
     def __init__(self) -> None:
@@ -142,17 +107,6 @@ class FakeFrameSource:
     def party_snapshot(self) -> dict[str, object]:
         self.party_calls += 1
         return self.party
-
-
-class FakeAudioSource:
-    def __init__(self) -> None:
-        self.sequence = 1
-
-    def status(self) -> dict[str, bool]:
-        return {"loaded": True}
-
-    def audio_packet(self) -> tuple[int, bytes]:
-        return self.sequence, bytes([0xF0, 0x10, 0xF8, 0x08])
 
 
 class FakeSocket:
@@ -229,45 +183,6 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         socket.release.set()
         await asyncio.sleep(0)
         self.assertEqual(socket.frames, [b"png-frame"])
-        await broadcaster.stop()
-
-
-class AudioBroadcasterTest(unittest.IsolatedAsyncioTestCase):
-    async def test_sends_one_sequence_header_and_pcm_packet(self) -> None:
-        source = FakeAudioSource()
-        broadcaster = server.AudioBroadcaster(source)
-        first = FakeSocket()
-        second = FakeSocket()
-        broadcaster.add(first)
-        broadcaster.add(second)
-
-        self.assertTrue(await broadcaster.broadcast_once())
-        await asyncio.sleep(0)
-
-        self.assertEqual(first.frames, second.frames)
-        self.assertEqual(struct.unpack(">I", first.frames[0][:4]), (1,))
-        self.assertEqual(first.frames[0][4:], bytes([0xF0, 0x10, 0xF8, 0x08]))
-        await broadcaster.stop()
-
-    async def test_slow_audio_client_skips_stale_packets(self) -> None:
-        source = FakeAudioSource()
-        broadcaster = server.AudioBroadcaster(source)
-        socket = FakeSocket(blocked=True)
-        broadcaster.add(socket)
-
-        self.assertTrue(await broadcaster.broadcast_once())
-        await socket.started.wait()
-        source.sequence = 2
-        self.assertFalse(await broadcaster.broadcast_once())
-
-        socket.release.set()
-        await asyncio.sleep(0)
-        source.sequence = 3
-        self.assertTrue(await broadcaster.broadcast_once())
-        await asyncio.sleep(0)
-
-        sequences = [struct.unpack(">I", packet[:4])[0] for packet in socket.frames]
-        self.assertEqual(sequences, [1, 3])
         await broadcaster.stop()
 
 
