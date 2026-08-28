@@ -17,6 +17,7 @@ import {
 const TAB_SESSION_STORAGE_KEY = "agents_play_tab_session";
 
 let sessionToken: string | null = null;
+let sessionRequest: Promise<SessionInfo> | null = null;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -28,7 +29,15 @@ export class ApiError extends Error {
   }
 }
 
-export async function startSession(): Promise<SessionInfo> {
+export function getSession(): Promise<SessionInfo> {
+  sessionRequest ??= createSession().catch((error: unknown) => {
+    sessionRequest = null;
+    throw error;
+  });
+  return sessionRequest;
+}
+
+async function createSession(): Promise<SessionInfo> {
   sessionToken = readStoredSessionToken();
   const session = await api<SessionBootstrap>("/api/session", { method: "POST" });
   sessionToken = session.token;
