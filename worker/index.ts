@@ -73,12 +73,21 @@ app.get("/ready", async (context) => {
   const startedAt = Date.now();
   const roomId = parseRoomId(context.env.DEFAULT_ROOM_ID);
   const checks = await Promise.all([
-    readinessCheck("game-room", () =>
-      context.env.GAME_ROOMS.getByName(roomId).readiness(roomId)
-    ),
-    readinessCheck("shared-computer", () =>
-      context.env.SHARED_COMPUTERS.getByName(roomId).readiness(roomId)
-    )
+    readinessCheck("game-room", async () => {
+      const descriptor = await context.env.GAME_ROOMS.getByName(roomId).frameDescriptor(roomId);
+      return {
+        roomId,
+        mode: descriptor.mode,
+        frameRevision: descriptor.frameRevision
+      };
+    }),
+    readinessCheck("shared-computer", async () => {
+      const overview = await context.env.SHARED_COMPUTERS.getByName(roomId).overview(roomId, 0);
+      return {
+        roomId,
+        filesystemRevision: overview.filesystemRevision
+      };
+    })
   ]);
   const ok = checks.every((check) => check.ok);
   return context.json(
