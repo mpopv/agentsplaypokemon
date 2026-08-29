@@ -66,22 +66,22 @@
     "DEFAULT_ROOM_ID": "main",
     "VOTE_WINDOW_MS": "15000",
     "COMPUTER_EXEC_TIMEOUT_MS": "5000",
-    "COMPUTER_OUTPUT_LIMIT_BYTES": "65536",
-    "SNAPSHOT_INTERVAL_MINUTES": "15"
+    "COMPUTER_OUTPUT_LIMIT_BYTES": "32768",
+    "SNAPSHOT_INTERVAL_MINUTES": "60"
   },
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["0 * * * *"]
   },
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1,
+    "head_sampling_rate": 0.1,
     "logs": {
       "enabled": true,
       "invocation_logs": true
     },
     "traces": {
       "enabled": true,
-      "head_sampling_rate": 1
+      "head_sampling_rate": 0.1
     }
   }
 }

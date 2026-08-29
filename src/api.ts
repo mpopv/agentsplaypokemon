@@ -4,18 +4,19 @@ import {
   type ChatHistoryPage,
   type ChatMessage,
   type ComputerEventHistoryPage,
-  type ComputerFileHistoryEntry,
   type ComputerFileView,
   type ComputerOverview,
   type ComputerTreeEntry,
   type GameInput,
   type GameObservation,
   type SessionBootstrap,
-  type SessionInfo
+  type SessionInfo,
+  type VoteReceipt
 } from "../shared/types";
 
 const TAB_SESSION_STORAGE_KEY = "agents_play_tab_session";
-const REQUEST_TIMEOUT_MS = 4_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
+const EXEC_REQUEST_TIMEOUT_MS = 20_000;
 const RETRY_DELAY_MS = 200;
 
 let sessionToken: string | null = null;
@@ -39,28 +40,38 @@ export function getSession(): Promise<SessionInfo> {
   return sessionRequest;
 }
 
+export async function readPublicRoom(): Promise<{ roomId: string }> {
+  return api("/public/room", undefined, false);
+}
+
+export async function observePublicGame(roomId: string): Promise<GameObservation> {
+  return api(`/public/rooms/${encodeURIComponent(roomId)}/game`, undefined, false);
+}
+
 export async function observeGame(roomId: string): Promise<GameObservation> {
-  return api<GameObservation>(`/rooms/${encodeURIComponent(roomId)}/game`);
+  return api(`/rooms/${encodeURIComponent(roomId)}/game`);
 }
 
-export async function readGameFrame(frameUrl: string): Promise<Blob> {
-  const url = new URL(frameUrl, window.location.origin);
-  if (url.origin !== window.location.origin) {
-    throw new ApiError("frame URL must use the application origin", 400);
-  }
-  const headers = new Headers({ authorization: `Bearer ${requireSessionToken()}` });
-  const response = await request(url, { headers });
-  if (!response.ok) {
-    throw new ApiError(`frame request failed with ${response.status}`, response.status);
-  }
-  return response.blob();
+export function readPublicGameFrame(frameUrl: string): Promise<Blob> {
+  return readFrame(frameUrl, false);
 }
 
-export async function submitVote(roomId: string, input: GameInput): Promise<GameObservation> {
-  return api<GameObservation>(`/rooms/${encodeURIComponent(roomId)}/votes`, {
+export function readGameFrame(frameUrl: string): Promise<Blob> {
+  return readFrame(frameUrl, true);
+}
+
+export async function submitVote(roomId: string, input: GameInput): Promise<VoteReceipt> {
+  return api(`/rooms/${encodeURIComponent(roomId)}/votes`, {
     method: "POST",
     body: JSON.stringify({ input })
   });
+}
+
+export async function readPublicChat(
+  roomId: string,
+  after = 0
+): Promise<{ messages: ChatMessage[]; cursor: number }> {
+  return api(`/public/rooms/${encodeURIComponent(roomId)}/chat?after=${after}`, undefined, false);
 }
 
 export async function readChat(
@@ -68,6 +79,14 @@ export async function readChat(
   after = 0
 ): Promise<{ messages: ChatMessage[]; cursor: number }> {
   return api(`/rooms/${encodeURIComponent(roomId)}/chat?after=${after}`);
+}
+
+export async function readPublicChatHistory(
+  roomId: string,
+  before?: number
+): Promise<ChatHistoryPage> {
+  const query = before === undefined ? "" : `?before=${before}`;
+  return api(`/public/rooms/${encodeURIComponent(roomId)}/chat/history${query}`, undefined, false);
 }
 
 export async function readChatHistory(
@@ -79,10 +98,22 @@ export async function readChatHistory(
 }
 
 export async function sendChat(roomId: string, message: string): Promise<ChatMessage> {
-  return api<ChatMessage>(`/rooms/${encodeURIComponent(roomId)}/chat`, {
+  return api(`/rooms/${encodeURIComponent(roomId)}/chat`, {
     method: "POST",
     body: JSON.stringify({ message })
   });
+}
+
+export async function readPublicAgentProfile(
+  roomId: string,
+  agentId: string,
+  signal?: AbortSignal
+): Promise<AgentProfile> {
+  return api(
+    `/public/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(agentId)}`,
+    { signal },
+    false
+  );
 }
 
 export async function readAgentProfile(
@@ -107,14 +138,39 @@ export async function execComputer(
   durationMs: number;
   filesystemRevision: number;
 }> {
-  return api(`/rooms/${encodeURIComponent(roomId)}/computer/exec`, {
-    method: "POST",
-    body: JSON.stringify({ command, cwd })
-  });
+  return api(
+    `/rooms/${encodeURIComponent(roomId)}/computer/exec`,
+    {
+      method: "POST",
+      body: JSON.stringify({ command, cwd })
+    },
+    true,
+    EXEC_REQUEST_TIMEOUT_MS
+  );
+}
+
+export async function readPublicComputer(roomId: string, after = 0): Promise<ComputerOverview> {
+  return api(
+    `/public/rooms/${encodeURIComponent(roomId)}/computer?after=${after}`,
+    undefined,
+    false
+  );
 }
 
 export async function readComputer(roomId: string, after = 0): Promise<ComputerOverview> {
   return api(`/rooms/${encodeURIComponent(roomId)}/computer?after=${after}`);
+}
+
+export async function readPublicComputerEventHistory(
+  roomId: string,
+  before?: number
+): Promise<ComputerEventHistoryPage> {
+  const query = before === undefined ? "" : `?before=${before}`;
+  return api(
+    `/public/rooms/${encodeURIComponent(roomId)}/computer/events${query}`,
+    undefined,
+    false
+  );
 }
 
 export async function readComputerEventHistory(
@@ -125,34 +181,50 @@ export async function readComputerEventHistory(
   return api(`/rooms/${encodeURIComponent(roomId)}/computer/events${query}`);
 }
 
-export async function readTree(
+export async function readPublicTree(
   roomId: string,
   path = "/workspace"
 ): Promise<{ path: string; entries: ComputerTreeEntry[] }> {
   return api(
-    `/rooms/${encodeURIComponent(roomId)}/computer/tree?path=${encodeURIComponent(path)}`
+    `/public/rooms/${encodeURIComponent(roomId)}/computer/tree?path=${encodeURIComponent(path)}`,
+    undefined,
+    false
+  );
+}
+
+export async function readTree(
+  roomId: string,
+  path = "/workspace"
+): Promise<{ path: string; entries: ComputerTreeEntry[] }> {
+  return api(`/rooms/${encodeURIComponent(roomId)}/computer/tree?path=${encodeURIComponent(path)}`);
+}
+
+export async function readPublicFile(roomId: string, path: string): Promise<ComputerFileView> {
+  return api(
+    `/public/rooms/${encodeURIComponent(roomId)}/computer/file?path=${encodeURIComponent(path)}`,
+    undefined,
+    false
   );
 }
 
 export async function readFile(roomId: string, path: string): Promise<ComputerFileView> {
-  return api(
-    `/rooms/${encodeURIComponent(roomId)}/computer/file?path=${encodeURIComponent(path)}`
-  );
+  return api(`/rooms/${encodeURIComponent(roomId)}/computer/file?path=${encodeURIComponent(path)}`);
 }
 
-export async function readHistory(
-  roomId: string,
-  path: string
-): Promise<{ path: string; history: ComputerFileHistoryEntry[] }> {
-  return api(
-    `/rooms/${encodeURIComponent(roomId)}/computer/history?path=${encodeURIComponent(path)}`
+export function publicSocketUrl(roomId: string, type: "game" | "computer"): string {
+  return webSocketUrl(
+    `/public/rooms/${encodeURIComponent(roomId)}/${type === "game" ? "game-socket" : "computer-socket"}`
   );
 }
 
 export function socketUrl(roomId: string, type: "game" | "computer"): string {
   return webSocketUrl(
-    `/rooms/${encodeURIComponent(roomId)}/${type === "game" ? "game-socket" : "computer-socket"}`,
+    `/rooms/${encodeURIComponent(roomId)}/${type === "game" ? "game-socket" : "computer-socket"}`
   );
+}
+
+export function publicGameStreamUrl(roomId: string): string {
+  return webSocketUrl(`/public/rooms/${encodeURIComponent(roomId)}/game-stream`);
 }
 
 export function gameStreamUrl(roomId: string): string {
@@ -169,11 +241,32 @@ function webSocketUrl(path: string): string {
   return url.toString();
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+async function readFrame(frameUrl: string, authenticated: boolean): Promise<Blob> {
+  const url = new URL(frameUrl, window.location.origin);
+  if (url.origin !== window.location.origin) {
+    throw new ApiError("frame URL must use the application origin", 400);
+  }
+  const headers = new Headers();
+  if (authenticated) headers.set("authorization", `Bearer ${requireSessionToken()}`);
+  const response = await request(url, { headers });
+  if (!response.ok) {
+    throw new ApiError(`frame request failed with ${response.status}`, response.status);
+  }
+  return response.blob();
+}
+
+async function api<T>(
+  path: string,
+  init?: RequestInit,
+  authenticated = true,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined) headers.set("content-type", "application/json");
-  if (sessionToken !== null) headers.set("authorization", `Bearer ${sessionToken}`);
-  const response = await request(path, { ...init, headers });
+  if (authenticated && sessionToken !== null) {
+    headers.set("authorization", `Bearer ${sessionToken}`);
+  }
+  const response = await request(path, { ...init, headers }, timeoutMs);
   const text = await response.text();
   let value: unknown = null;
   if (text) {
@@ -208,7 +301,11 @@ async function createSession(): Promise<SessionInfo> {
   };
 }
 
-async function request(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function request(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+): Promise<Response> {
   const method = (init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   const retrySafe = method === "GET" || headers.get("x-retry-safe") !== null;
@@ -217,12 +314,12 @@ async function request(input: RequestInfo | URL, init: RequestInit = {}): Promis
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetchWithDeadline(input, {
-        ...init,
-        headers,
-        credentials: "omit"
-      });
-      if (attempt + 1 < attempts && isRetryableStatus(response.status)) {
+      const response = await fetchWithDeadline(
+        input,
+        { ...init, headers, credentials: "omit" },
+        timeoutMs
+      );
+      if (attempt + 1 < attempts && shouldRetryResponse(response)) {
         await response.body?.cancel();
         await retryDelay(attempt);
         continue;
@@ -243,25 +340,27 @@ async function request(input: RequestInfo | URL, init: RequestInit = {}): Promis
   throw new ApiError("request failed", 0);
 }
 
+function shouldRetryResponse(response: Response): boolean {
+  return response.headers.get("x-retryable") === "true" &&
+    response.headers.get("x-overloaded") !== "true" &&
+    response.headers.get("retry-after") === null;
+}
+
 async function fetchWithDeadline(
   input: RequestInfo | URL,
-  init: RequestInit
+  init: RequestInit,
+  timeoutMs: number
 ): Promise<Response> {
   const controller = new AbortController();
   const abort = () => controller.abort(init.signal?.reason);
   init.signal?.addEventListener("abort", abort, { once: true });
-  const timer = globalThis.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } finally {
     globalThis.clearTimeout(timer);
     init.signal?.removeEventListener("abort", abort);
   }
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status === 500 ||
-    status === 502 || status === 504;
 }
 
 async function retryDelay(attempt: number): Promise<void> {

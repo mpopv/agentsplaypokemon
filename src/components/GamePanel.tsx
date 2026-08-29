@@ -23,7 +23,9 @@ interface GamePanelProps {
 }
 
 export function GamePanel({ game, onPartyUpdate }: GamePanelProps) {
-  const endsIn = game ? Math.max(0, Math.ceil((game.voteWindow.endsAt - Date.now()) / 1000)) : 0;
+  const endsIn = game?.voteWindow
+    ? Math.max(0, Math.ceil((game.voteWindow.endsAt - Date.now()) / 1000))
+    : 0;
   const totalVotes = game?.votes.reduce((sum, vote) => sum + vote.count, 0) ?? 0;
 
   return (

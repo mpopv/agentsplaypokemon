@@ -21,6 +21,7 @@ export function useAgentRoomData() {
   const chatReady = useRef(false);
   const refreshRequest = useRef<Promise<void> | null>(null);
   const frameUrl = useRef<string | null>(null);
+  const frameRevision = useRef<number | null>(null);
   const active = useRef(true);
 
   const refresh = useCallback((): Promise<void> => {
@@ -40,16 +41,19 @@ export function useAgentRoomData() {
       if (gameResult.status === "fulfilled") {
         setGame(gameResult.value);
         updated = true;
-        try {
-          const blob = await readGameFrame(gameResult.value.frameUrl);
-          if (!active.current) return;
-          const nextUrl = URL.createObjectURL(blob);
-          const previousUrl = frameUrl.current;
-          frameUrl.current = nextUrl;
-          setFrameObjectUrl(nextUrl);
-          if (previousUrl) URL.revokeObjectURL(previousUrl);
-        } catch (cause) {
-          failures.push(cause);
+        if (frameRevision.current !== gameResult.value.frameRevision) {
+          try {
+            const blob = await readGameFrame(gameResult.value.frameUrl);
+            if (!active.current) return;
+            const nextUrl = URL.createObjectURL(blob);
+            const previousUrl = frameUrl.current;
+            frameRevision.current = gameResult.value.frameRevision;
+            frameUrl.current = nextUrl;
+            setFrameObjectUrl(nextUrl);
+            if (previousUrl) URL.revokeObjectURL(previousUrl);
+          } catch (cause) {
+            failures.push(cause);
+          }
         }
       } else {
         failures.push(gameResult.reason);
@@ -106,8 +110,8 @@ export function useAgentRoomData() {
 
   useEffect(() => {
     if (!session) return;
-    return registerRoomTools(session.roomId, setWebMcpStatus, () => void refresh());
-  }, [refresh, session]);
+    return registerRoomTools(session.roomId, setWebMcpStatus);
+  }, [session]);
 
   useEffect(() => {
     active.current = true;

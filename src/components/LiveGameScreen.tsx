@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { PokemonPartySnapshot } from "../../shared/types";
-import { gameStreamUrl, readGameFrame, sessionSocketProtocols } from "../api";
+import { publicGameStreamUrl, readPublicGameFrame } from "../api";
 
 type StreamState = "checkpoint" | "connecting" | "live" | "retrying";
 
@@ -31,7 +31,7 @@ export function LiveGameScreen({
     let active = true;
     let objectUrl: string | undefined;
     setCheckpointUrl(null);
-    void readGameFrame(frameUrl)
+    void readPublicGameFrame(frameUrl)
       .then((frame) => {
         if (!active) return;
         objectUrl = URL.createObjectURL(frame);
@@ -112,7 +112,7 @@ export function LiveGameScreen({
       setStreamState(attempt === 0 ? "connecting" : "retrying");
       displayingLiveFrame = false;
       const generation = ++connectionGeneration;
-      const nextSocket = new WebSocket(gameStreamUrl(roomId), sessionSocketProtocols());
+      const nextSocket = new WebSocket(publicGameStreamUrl(roomId));
       socket = nextSocket;
       nextSocket.binaryType = "arraybuffer";
       nextSocket.addEventListener("open", () => {
@@ -226,7 +226,7 @@ function isIntegerInRange(value: unknown, minimum: number, maximum: number): val
 
 function streamLabel(mode: "demo" | "rom", state: StreamState): string {
   if (mode === "demo") return "DEMO MAP";
-  if (state === "live") return "LIVE · 30 FPS";
+  if (state === "live") return "LIVE · 15 FPS";
   if (state === "retrying") return "CHECKPOINT · RETRYING";
   return "STREAM CONNECTING";
 }

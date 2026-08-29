@@ -1,14 +1,11 @@
-import type { WebMcpStatus } from "../webmcp";
-
 interface StatusBarProps {
   gameSocket: "connecting" | "open" | "closed";
   computerSocket: "connecting" | "open" | "closed";
-  webMcpStatus: WebMcpStatus;
   agents: number;
   mode: "demo" | "rom" | undefined;
 }
 
-export function StatusBar({ gameSocket, computerSocket, webMcpStatus, agents, mode }: StatusBarProps) {
+export function StatusBar({ gameSocket, computerSocket, agents, mode }: StatusBarProps) {
   const bothOpen = gameSocket === "open" && computerSocket === "open";
   return (
     <footer className="status-bar">
@@ -22,9 +19,7 @@ export function StatusBar({ gameSocket, computerSocket, webMcpStatus, agents, mo
       <i />
       <span>GAME {mode === "rom" ? "ROM" : "DEMO"}</span>
       <i />
-      <span className={webMcpStatus === "available" ? "status-good" : "status-muted"}>
-        ◈ WEBMCP {webMcpLabel(webMcpStatus)}
-      </span>
+      <span className="status-muted">SPECTATOR READ ONLY</span>
     </footer>
   );
 }
@@ -33,11 +28,4 @@ function socketGlyph(state: "connecting" | "open" | "closed"): string {
   if (state === "open") return "✓";
   if (state === "connecting") return "…";
   return "×";
-}
-
-function webMcpLabel(status: WebMcpStatus): string {
-  if (status === "available") return "TOOLS AVAILABLE";
-  if (status === "unavailable") return "NOT IN THIS BROWSER";
-  if (status === "error") return "TOOL ERROR";
-  return "REGISTERING";
 }

@@ -10,7 +10,9 @@ import {
   type GameInput,
   type GameObservation,
   type SocketEnvelope,
+  type VoteReceipt,
   type VoteTally,
+  type VoteTallyUpdate,
   type VoteWindow
 } from "../shared/types";
 import { makeHistoryPage } from "./lib/history-page";
@@ -88,12 +90,27 @@ interface ResolvePayload {
   windowId: number;
 }
 
+interface GameMetricCounts {
+  observeRequests: number;
+  chatReads: number;
+  votes: number;
+  gameEvents: number;
+  presenceWrites: number;
+}
+
+type GameMetricName = keyof GameMetricCounts;
+
 const PRESENCE_TTL_MS = 120_000;
 const CHAT_RATE_LIMIT_MS = 2_000;
+const VOTE_RATE_LIMIT_MS = 300;
+const VOTE_BROADCAST_DELAY_MS = 75;
 const CHAT_HISTORY_PAGE_SIZE = 30;
 const ROM_MAX_BYTES = 8 * 1024 * 1024;
 const FRAME_MAX_BYTES = 1024 * 1024;
 const STATE_MAX_BYTES = 4 * 1024 * 1024;
+const RAW_EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+const CHAT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const PRESENCE_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 export class GameRoomDO extends Container<Env> {
   defaultPort = 8080;
@@ -101,6 +118,11 @@ export class GameRoomDO extends Container<Env> {
   sleepAfter = "20m";
   enableInternet = false;
   pingEndpoint = "localhost/health";
+  private voteBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  private stateCheckpointRequested = false;
+  private stateCheckpointTask: Promise<void> | null = null;
+  private metricWindowStartedAt = Date.now();
+  private metricCounts: GameMetricCounts = emptyGameMetrics();
 
   constructor(ctx: DurableObjectState<{}>, env: Env) {
     super(ctx, env);
@@ -108,61 +130,47 @@ export class GameRoomDO extends Container<Env> {
   }
 
   async observe(roomId: string, agent: AgentIdentity): Promise<GameObservation> {
+    this.recordMetric("observeRequests");
     this.identify(roomId);
     this.touchPresence(agent);
     const window = await this.ensureVoteWindow();
-    const meta = this.readMeta();
-    const votes = this.ctx.storage.sql
-      .exec<VoteTallyRow>(
-        `SELECT input, COUNT(*) AS count
-         FROM votes
-         WHERE window_id = ?
-         GROUP BY input`,
-        window.id
-      )
-      .toArray();
-    const tallies = GAME_INPUTS.map((input) => ({
-      input,
-      count: Number(votes.find((row) => row.input === input)?.count ?? 0)
-    }));
-    const yourVote =
-      this.ctx.storage.sql
-        .exec<{ input: GameInput }>(
-          "SELECT input FROM votes WHERE window_id = ? AND agent_id = ?",
-          window.id,
-          agent.agentId
-        )
-        .toArray()[0]?.input ?? null;
-    const activeAgents = Number(
-      this.ctx.storage.sql
-        .exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM presence WHERE last_seen >= ?",
-          Date.now() - PRESENCE_TTL_MS
-        )
-        .one().count
-    );
-
-    return {
-      roomId,
-      mode: meta.mode,
-      frameRevision: meta.frame_revision,
-      frameUrl: `/rooms/${roomId}/game/frame?rev=${meta.frame_revision}`,
-      activeAgents,
-      voteWindow: mapWindow(window),
-      votes: tallies,
-      yourVote,
-      lastInput: meta.last_input,
-      events: this.readEvents(40)
-    };
+    return this.buildObservation(roomId, window, agent.agentId, false);
   }
 
-  async vote(roomId: string, agent: AgentIdentity, input: GameInput): Promise<GameObservation> {
+  spectate(roomId: string): GameObservation {
+    this.recordMetric("observeRequests");
+    this.identify(roomId);
+    return this.buildObservation(roomId, this.currentWindow(), null, true);
+  }
+
+  async vote(roomId: string, agent: AgentIdentity, input: GameInput): Promise<VoteReceipt> {
+    this.recordMetric("votes");
     this.identify(roomId);
     this.touchPresence(agent);
     const window = await this.ensureVoteWindow();
     if (window.ends_at <= Date.now()) {
       throw new InputError("this vote window is closed", 409);
     }
+    const previous = this.ctx.storage.sql
+      .exec<{ input: GameInput; created_at: number }>(
+        "SELECT input, created_at FROM votes WHERE window_id = ? AND agent_id = ?",
+        window.id,
+        agent.agentId
+      )
+      .toArray()[0];
+    if (previous?.input === input) {
+      return {
+        accepted: true,
+        windowId: window.id,
+        input,
+        endsAt: window.ends_at,
+        unchanged: true
+      };
+    }
+    if (previous && Date.now() - previous.created_at < VOTE_RATE_LIMIT_MS) {
+      throw new InputError("wait before you change your vote again", 429, 1);
+    }
+    const createdAt = Date.now();
     this.ctx.storage.sql.exec(
       `INSERT INTO votes (window_id, agent_id, input, created_at)
        VALUES (?, ?, ?, ?)
@@ -171,21 +179,32 @@ export class GameRoomDO extends Container<Env> {
       window.id,
       agent.agentId,
       input,
-      Date.now()
+      createdAt
     );
-    const event = this.appendEvent("vote.submitted", {
+    this.appendEvent("vote.submitted", {
       windowId: window.id,
       agentId: agent.agentId,
       displayName: agent.displayName,
       input
     });
-    this.broadcast("vote.submitted", event);
-    return this.observe(roomId, agent);
+    this.scheduleVoteBroadcast(roomId, window.id);
+    return {
+      accepted: true,
+      windowId: window.id,
+      input,
+      endsAt: window.ends_at,
+      unchanged: false
+    };
   }
 
   readChat(roomId: string, agent: AgentIdentity, after: number): ChatMessage[] {
+    this.recordMetric("chatReads");
     this.identify(roomId);
     this.touchPresence(agent);
+    return this.readChatRows(after);
+  }
+
+  private readChatRows(after: number): ChatMessage[] {
     return this.ctx.storage.sql
       .exec<ChatRow>(
         `SELECT sequence, agent_id, display_name, message, created_at
@@ -199,13 +218,20 @@ export class GameRoomDO extends Container<Env> {
       .map(mapChat);
   }
 
+  readPublicChat(roomId: string, after: number): ChatMessage[] {
+    this.recordMetric("chatReads");
+    this.identify(roomId);
+    return this.readChatRows(after);
+  }
+
   readChatHistory(
     roomId: string,
-    agent: AgentIdentity,
+    agent: AgentIdentity | null,
     before?: number
   ): ChatHistoryPage {
+    this.recordMetric("chatReads");
     this.identify(roomId);
-    this.touchPresence(agent);
+    if (agent) this.touchPresence(agent);
     const rows = before === undefined
       ? this.ctx.storage.sql
           .exec<ChatRow>(
@@ -245,7 +271,7 @@ export class GameRoomDO extends Container<Env> {
       )
       .toArray()[0];
     if (last && Date.now() - last.created_at < CHAT_RATE_LIMIT_MS) {
-      throw new InputError("wait two seconds before you send another chat message", 429);
+      throw new InputError("wait two seconds before you send another chat message", 429, 2);
     }
     const row = this.ctx.storage.sql
       .exec<ChatRow>(
@@ -265,11 +291,25 @@ export class GameRoomDO extends Container<Env> {
 
   agentActivity(
     roomId: string,
-    viewer: AgentIdentity,
+    viewer: AgentIdentity | null,
     agentId: string
   ): GameAgentActivity {
     this.identify(roomId);
-    this.touchPresence(viewer);
+    if (viewer) this.touchPresence(viewer);
+    const summary = this.ctx.storage.sql
+      .exec<{
+        display_name: string;
+        vote_count: number;
+        chat_count: number;
+        first_recorded_at: number | null;
+        last_recorded_at: number | null;
+      }>(
+        `SELECT display_name, vote_count, chat_count, first_recorded_at, last_recorded_at
+         FROM game_agent_summaries
+         WHERE agent_id = ?`,
+        agentId
+      )
+      .toArray()[0];
     const presence = this.ctx.storage.sql
       .exec<PresenceRow>(
         `SELECT display_name, last_seen
@@ -316,13 +356,21 @@ export class GameRoomDO extends Container<Env> {
       .toArray()[0];
 
     return {
-      displayName: presence?.display_name ?? lastChat?.display_name ?? null,
-      firstRecordedAt: minimumTimestamp(voteStats.first_at, chatStats.first_at),
-      lastRecordedAt: maximumTimestamp(voteStats.last_at, chatStats.last_at),
+      displayName: presence?.display_name ?? lastChat?.display_name ?? summary?.display_name ?? null,
+      firstRecordedAt: minimumTimestamp(
+        summary?.first_recorded_at,
+        voteStats.first_at,
+        chatStats.first_at
+      ),
+      lastRecordedAt: maximumTimestamp(
+        summary?.last_recorded_at,
+        voteStats.last_at,
+        chatStats.last_at
+      ),
       lastSeenAt: presence?.last_seen ?? null,
       online: presence !== undefined && presence.last_seen >= Date.now() - PRESENCE_TTL_MS,
-      voteWindowCount: Number(voteStats.count),
-      chatMessageCount: Number(chatStats.count),
+      voteWindowCount: Number(summary?.vote_count ?? 0) + Number(voteStats.count),
+      chatMessageCount: Number(summary?.chat_count ?? 0) + Number(chatStats.count),
       lastVote: lastVote
         ? {
             windowId: lastVote.window_id,
@@ -382,8 +430,125 @@ export class GameRoomDO extends Container<Env> {
       frameKey,
       Date.now()
     );
-    const event = this.appendEvent("emulator.rom_loaded", { romSha256 });
-    this.broadcast("emulator.rom_loaded", event);
+    this.appendEvent("emulator.rom_loaded", { romSha256 });
+    this.broadcast("game.state", this.buildObservation(roomId, this.currentWindow(), null, true));
+  }
+
+  async checkpoint(roomId: string): Promise<{ mode: "demo" | "rom"; durationMs: number }> {
+    this.identify(roomId);
+    const startedAt = Date.now();
+    const meta = this.readMeta();
+    if (meta.mode === "rom") {
+      await this.ensureEmulatorLoaded(meta);
+      if (!meta.frame_key || !meta.state_key) throw new Error("emulator storage keys are missing");
+      await this.persistEmulatorArtifacts(meta.frame_key, meta.state_key);
+    }
+    const result = { mode: meta.mode, durationMs: Date.now() - startedAt };
+    console.log({ message: "game checkpoint completed", roomId, ...result });
+    return result;
+  }
+
+  async runtimeProbe(roomId: string): Promise<Record<string, unknown>> {
+    this.identify(roomId);
+    const startedAt = Date.now();
+    const meta = this.readMeta();
+    if (meta.mode === "rom") await this.ensureEmulatorLoaded(meta);
+    const response = await this.containerFetch("http://container/health");
+    const health = await expectContainerJson(response, "probe emulator runtime");
+    return { ok: true, durationMs: Date.now() - startedAt, health };
+  }
+
+  async restartRuntime(roomId: string): Promise<Record<string, unknown>> {
+    await this.checkpoint(roomId);
+    await this.destroy();
+    await this.startAndWaitForPorts();
+    return this.runtimeProbe(roomId);
+  }
+
+  async maintain(roomId: string): Promise<{
+    deletedVoteWindows: number;
+    deletedChatMessages: number;
+    deletedEvents: number;
+    deletedPresence: number;
+  }> {
+    this.identify(roomId);
+    const now = Date.now();
+    const voteCutoff = now - RAW_EVENT_RETENTION_MS;
+    const chatCutoff = now - CHAT_RETENTION_MS;
+    const voteSummaries = this.ctx.storage.sql
+      .exec<{ agent_id: string; count: number; first_at: number; last_at: number }>(
+        `SELECT votes.agent_id AS agent_id, COUNT(*) AS count,
+                MIN(votes.created_at) AS first_at, MAX(votes.created_at) AS last_at
+         FROM votes
+         JOIN vote_windows ON vote_windows.id = votes.window_id
+         WHERE vote_windows.status = 'resolved' AND vote_windows.ends_at < ?
+         GROUP BY votes.agent_id`,
+        voteCutoff
+      )
+      .toArray();
+    for (const summary of voteSummaries) {
+      this.mergeAgentSummary(summary.agent_id, summary.count, 0, summary.first_at, summary.last_at);
+    }
+    const chatSummaries = this.ctx.storage.sql
+      .exec<{ agent_id: string; count: number; first_at: number; last_at: number }>(
+        `SELECT agent_id, COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+         FROM chat_messages
+         WHERE created_at < ?
+         GROUP BY agent_id`,
+        chatCutoff
+      )
+      .toArray();
+    for (const summary of chatSummaries) {
+      this.mergeAgentSummary(summary.agent_id, 0, summary.count, summary.first_at, summary.last_at);
+    }
+
+    const deletedVoteWindows = Number(
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM vote_windows WHERE status = 'resolved' AND ends_at < ?",
+          voteCutoff
+        )
+        .one().count
+    );
+    const deletedChatMessages = Number(
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM chat_messages WHERE created_at < ?",
+          chatCutoff
+        )
+        .one().count
+    );
+    const deletedEvents = Number(
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM game_events WHERE created_at < ?",
+          voteCutoff
+        )
+        .one().count
+    );
+    const presenceCutoff = now - PRESENCE_RETENTION_MS;
+    const deletedPresence = Number(
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM presence WHERE last_seen < ?",
+          presenceCutoff
+        )
+        .one().count
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM votes WHERE window_id IN (SELECT id FROM vote_windows WHERE status = 'resolved' AND ends_at < ?)",
+      voteCutoff
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM vote_windows WHERE status = 'resolved' AND ends_at < ?",
+      voteCutoff
+    );
+    this.ctx.storage.sql.exec("DELETE FROM chat_messages WHERE created_at < ?", chatCutoff);
+    this.ctx.storage.sql.exec("DELETE FROM game_events WHERE created_at < ?", voteCutoff);
+    this.ctx.storage.sql.exec("DELETE FROM presence WHERE last_seen < ?", presenceCutoff);
+    const result = { deletedVoteWindows, deletedChatMessages, deletedEvents, deletedPresence };
+    console.log({ message: "game retention completed", roomId, ...result });
+    return result;
   }
 
   async resolveVoteWindow(payload: ResolvePayload): Promise<void> {
@@ -414,38 +579,44 @@ export class GameRoomDO extends Container<Env> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/internal/game-stream") {
-      return this.openGameStream(request);
+      return this.openGameStream(request, true);
     }
-    if (url.pathname !== "/internal/game-socket") {
+    if (url.pathname === "/internal/public-game-stream") {
+      return this.openGameStream(request, false);
+    }
+    if (url.pathname !== "/internal/game-socket" && url.pathname !== "/internal/public-game-socket") {
       return new Response("not found", { status: 404 });
     }
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("websocket upgrade required", { status: 426 });
     }
+    const participant = url.pathname === "/internal/game-socket";
     const agentId = request.headers.get("x-agent-id");
     const displayName = request.headers.get("x-agent-name");
-    if (!agentId || !displayName) return new Response("unauthorized", { status: 401 });
-    this.touchPresence({ agentId, displayName });
+    if (participant) {
+      if (!agentId || !displayName) return new Response("unauthorized", { status: 401 });
+      this.touchPresence({ agentId, displayName });
+    }
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
-    this.ctx.acceptWebSocket(server, ["game", `agent:${agentId}`]);
+    this.ctx.acceptWebSocket(server, participant && agentId ? ["game", `agent:${agentId}`] : ["game"]);
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async openGameStream(request: Request): Promise<Response> {
+  private async openGameStream(request: Request, participant: boolean): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("websocket upgrade required", { status: 426 });
     }
     const roomId = request.headers.get("x-room-id");
     const agentId = request.headers.get("x-agent-id");
     const displayName = request.headers.get("x-agent-name");
-    if (!roomId || !agentId || !displayName) {
+    if (!roomId || (participant && (!agentId || !displayName))) {
       return new Response("unauthorized", { status: 401 });
     }
 
     this.identify(roomId);
-    this.touchPresence({ agentId, displayName });
+    if (participant && agentId && displayName) this.touchPresence({ agentId, displayName });
     const meta = this.readMeta();
     if (meta.mode !== "rom") {
       return new Response("live stream requires a ROM", { status: 409 });
@@ -540,6 +711,15 @@ export class GameRoomDO extends Container<Env> {
         data_json TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS game_agent_summaries (
+        agent_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        vote_count INTEGER NOT NULL,
+        chat_count INTEGER NOT NULL,
+        first_recorded_at INTEGER,
+        last_recorded_at INTEGER
+      );
     `);
   }
 
@@ -559,6 +739,7 @@ export class GameRoomDO extends Container<Env> {
   }
 
   private touchPresence(agent: AgentIdentity): void {
+    this.recordMetric("presenceWrites");
     this.ctx.storage.sql.exec(
       `INSERT INTO presence (agent_id, display_name, last_seen)
        VALUES (?, ?, ?)
@@ -568,6 +749,99 @@ export class GameRoomDO extends Container<Env> {
       agent.displayName,
       Date.now()
     );
+    this.ctx.storage.sql.exec(
+      `INSERT INTO game_agent_summaries
+        (agent_id, display_name, vote_count, chat_count, first_recorded_at, last_recorded_at)
+       VALUES (?, ?, 0, 0, NULL, NULL)
+       ON CONFLICT(agent_id) DO UPDATE SET display_name = excluded.display_name`,
+      agent.agentId,
+      agent.displayName
+    );
+  }
+
+  private currentWindow(): VoteWindowRow | null {
+    return this.ctx.storage.sql
+      .exec<VoteWindowRow>(
+        `SELECT id, starts_at, ends_at, status, winner, scheduled
+         FROM vote_windows
+         WHERE status = 'open' AND ends_at > ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        Date.now()
+      )
+      .toArray()[0] ?? null;
+  }
+
+  private buildObservation(
+    roomId: string,
+    window: VoteWindowRow | null,
+    agentId: string | null,
+    publicFrame: boolean
+  ): GameObservation {
+    const meta = this.readMeta();
+    const votes = window
+      ? this.ctx.storage.sql
+          .exec<VoteTallyRow>(
+            `SELECT input, COUNT(*) AS count
+             FROM votes
+             WHERE window_id = ?
+             GROUP BY input`,
+            window.id
+          )
+          .toArray()
+      : [];
+    const tallies = GAME_INPUTS.map((input) => ({
+      input,
+      count: Number(votes.find((row) => row.input === input)?.count ?? 0)
+    }));
+    const yourVote = window && agentId
+      ? this.ctx.storage.sql
+          .exec<{ input: GameInput }>(
+            "SELECT input FROM votes WHERE window_id = ? AND agent_id = ?",
+            window.id,
+            agentId
+          )
+          .toArray()[0]?.input ?? null
+      : null;
+    return {
+      roomId,
+      mode: meta.mode,
+      frameRevision: meta.frame_revision,
+      frameUrl: `${publicFrame ? "/public" : ""}/rooms/${roomId}/game/frame?rev=${meta.frame_revision}`,
+      activeAgents: this.activeAgentCount(),
+      voteWindow: window ? mapWindow(window) : null,
+      votes: tallies,
+      yourVote,
+      lastInput: meta.last_input,
+      events: this.readEvents(40)
+    };
+  }
+
+  private activeAgentCount(): number {
+    return Number(
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM presence WHERE last_seen >= ?",
+          Date.now() - PRESENCE_TTL_MS
+        )
+        .one().count
+    );
+  }
+
+  private scheduleVoteBroadcast(roomId: string, windowId: number): void {
+    if (this.voteBroadcastTimer !== null) return;
+    this.voteBroadcastTimer = setTimeout(() => {
+      this.voteBroadcastTimer = null;
+      const window = this.currentWindow();
+      if (!window || window.id !== windowId) return;
+      const observation = this.buildObservation(roomId, window, null, true);
+      const update: VoteTallyUpdate = {
+        windowId,
+        votes: observation.votes,
+        activeAgents: observation.activeAgents
+      };
+      this.broadcast("vote.tally", update);
+    }, VOTE_BROADCAST_DELAY_MS);
   }
 
   private async ensureVoteWindow(): Promise<VoteWindowRow> {
@@ -600,12 +874,15 @@ export class GameRoomDO extends Container<Env> {
       )
       .one();
     await this.scheduleWindow(created);
-    const event = this.appendEvent("vote_window.opened", {
+    this.appendEvent("vote_window.opened", {
       windowId: created.id,
       startsAt: now,
       endsAt
     });
-    this.broadcast("vote_window.opened", event);
+    this.broadcast(
+      "game.state",
+      this.buildObservation(roomIdFromMeta(this.readMeta()), created, null, true)
+    );
     return { ...created, scheduled: 1 };
   }
 
@@ -661,24 +938,20 @@ export class GameRoomDO extends Container<Env> {
         message: error instanceof Error ? error.message : String(error)
       });
     }
-    const event = this.appendEvent("vote_window.resolved", { windowId, winner });
-    this.broadcast("vote_window.resolved", event);
-
-    const activeAgents = Number(
-      this.ctx.storage.sql
-        .exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM presence WHERE last_seen >= ?",
-          Date.now() - PRESENCE_TTL_MS
-        )
-        .one().count
+    this.appendEvent("vote_window.resolved", { windowId, winner });
+    this.broadcast(
+      "game.state",
+      this.buildObservation(roomIdFromMeta(this.readMeta()), null, null, true)
     );
+
+    const activeAgents = this.activeAgentCount();
     if (activeAgents > 0) await this.ensureVoteWindow();
   }
 
   private async advanceGame(input: GameInput | null): Promise<void> {
     const meta = this.readMeta();
+    if (input === null) return;
     if (meta.mode === "demo") {
-      if (input === null) return;
       let x = meta.demo_x;
       let y = meta.demo_y;
       if (input === "up") y = Math.max(0, y - 1);
@@ -699,16 +972,14 @@ export class GameRoomDO extends Container<Env> {
     }
 
     await this.ensureEmulatorLoaded(meta);
-    if (input !== null) {
-      const response = await this.containerFetch("http://container/input", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input, frames: 12 })
-      });
-      await expectContainerJson(response, "apply controller input");
-    }
+    const response = await this.containerFetch("http://container/input", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input, frames: 12 })
+    });
+    await expectContainerJson(response, "apply controller input");
     if (!meta.frame_key || !meta.state_key) throw new Error("emulator storage keys are missing");
-    await this.persistEmulatorArtifacts(meta.frame_key, meta.state_key);
+    await this.persistEmulatorFrame(meta.frame_key);
     this.ctx.storage.sql.exec(
       `UPDATE room_meta
        SET last_input = COALESCE(?, last_input),
@@ -718,6 +989,7 @@ export class GameRoomDO extends Container<Env> {
       input,
       Date.now()
     );
+    this.requestStateCheckpoint(meta.state_key);
   }
 
   private async ensureEmulatorLoaded(meta: RoomMetaRow): Promise<void> {
@@ -750,11 +1022,23 @@ export class GameRoomDO extends Container<Env> {
   }
 
   private async persistEmulatorArtifacts(frameKey: string, stateKey: string): Promise<void> {
+    const startedAt = Date.now();
+    await Promise.all([this.persistEmulatorFrame(frameKey), this.persistEmulatorState(stateKey)]);
+    console.log({
+      message: "emulator artifacts persisted",
+      durationMs: Date.now() - startedAt
+    });
+  }
+
+  private async persistEmulatorFrame(frameKey: string): Promise<void> {
     const frameResponse = await this.containerFetch("http://container/frame");
     const frame = await expectContainerBytes(frameResponse, "capture frame", FRAME_MAX_BYTES);
     await this.env.PRIVATE_DATA.put(frameKey, frame, {
       httpMetadata: { contentType: "image/png" }
     });
+  }
+
+  private async persistEmulatorState(stateKey: string): Promise<void> {
     const stateResponse = await this.containerFetch("http://container/state");
     const state = await expectContainerBytes(stateResponse, "save state", STATE_MAX_BYTES);
     await this.env.PRIVATE_DATA.put(stateKey, state, {
@@ -762,11 +1046,80 @@ export class GameRoomDO extends Container<Env> {
     });
   }
 
+  private requestStateCheckpoint(stateKey: string): void {
+    this.stateCheckpointRequested = true;
+    if (this.stateCheckpointTask !== null) return;
+    const task = this.runStateCheckpoints(stateKey).finally(() => {
+      this.stateCheckpointTask = null;
+    });
+    this.stateCheckpointTask = task;
+    this.ctx.waitUntil(task);
+  }
+
+  private async runStateCheckpoints(stateKey: string): Promise<void> {
+    while (this.stateCheckpointRequested) {
+      this.stateCheckpointRequested = false;
+      const startedAt = Date.now();
+      try {
+        await this.persistEmulatorState(stateKey);
+        console.log({
+          message: "emulator state checkpoint persisted",
+          durationMs: Date.now() - startedAt
+        });
+      } catch (error) {
+        console.error({
+          message: "emulator state checkpoint failed",
+          durationMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
   private readMeta(): RoomMetaRow {
     return this.ctx.storage.sql.exec<RoomMetaRow>("SELECT * FROM room_meta WHERE id = 1").one();
   }
 
+  private mergeAgentSummary(
+    agentId: string,
+    voteCount: number,
+    chatCount: number,
+    firstAt: number,
+    lastAt: number
+  ): void {
+    const displayName = this.ctx.storage.sql
+      .exec<{ display_name: string }>(
+        "SELECT display_name FROM game_agent_summaries WHERE agent_id = ?",
+        agentId
+      )
+      .toArray()[0]?.display_name ?? `Agent ${agentId.slice(0, 4)}`;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO game_agent_summaries
+        (agent_id, display_name, vote_count, chat_count, first_recorded_at, last_recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         display_name = excluded.display_name,
+         vote_count = game_agent_summaries.vote_count + excluded.vote_count,
+         chat_count = game_agent_summaries.chat_count + excluded.chat_count,
+         first_recorded_at = CASE
+           WHEN game_agent_summaries.first_recorded_at IS NULL THEN excluded.first_recorded_at
+           ELSE MIN(game_agent_summaries.first_recorded_at, excluded.first_recorded_at)
+         END,
+         last_recorded_at = CASE
+           WHEN game_agent_summaries.last_recorded_at IS NULL THEN excluded.last_recorded_at
+           ELSE MAX(game_agent_summaries.last_recorded_at, excluded.last_recorded_at)
+         END`,
+      agentId,
+      displayName,
+      voteCount,
+      chatCount,
+      firstAt,
+      lastAt
+    );
+  }
+
   private appendEvent(eventType: string, data: Record<string, unknown>): GameEvent {
+    this.recordMetric("gameEvents");
     const row = this.ctx.storage.sql
       .exec<GameEventRow>(
         `INSERT INTO game_events (event_type, data_json, created_at)
@@ -805,6 +1158,37 @@ export class GameRoomDO extends Container<Env> {
       }
     }
   }
+
+  private recordMetric(name: GameMetricName): void {
+    const now = Date.now();
+    const durationMs = now - this.metricWindowStartedAt;
+    if (durationMs >= 60_000) {
+      const seconds = durationMs / 1_000;
+      console.log({
+        message: "game room request metrics",
+        windowMs: durationMs,
+        observeRequestsPerSecond: this.metricCounts.observeRequests / seconds,
+        chatReadsPerSecond: this.metricCounts.chatReads / seconds,
+        votesPerSecond: this.metricCounts.votes / seconds,
+        gameEventsPerSecond: this.metricCounts.gameEvents / seconds,
+        presenceWritesPerSecond: this.metricCounts.presenceWrites / seconds,
+        eventSocketCount: this.ctx.getWebSockets("game").length
+      });
+      this.metricWindowStartedAt = now;
+      this.metricCounts = emptyGameMetrics();
+    }
+    this.metricCounts[name] += 1;
+  }
+}
+
+function emptyGameMetrics(): GameMetricCounts {
+  return {
+    observeRequests: 0,
+    chatReads: 0,
+    votes: 0,
+    gameEvents: 0,
+    presenceWrites: 0
+  };
 }
 
 function mapWindow(row: VoteWindowRow): VoteWindow {
@@ -815,6 +1199,11 @@ function mapWindow(row: VoteWindowRow): VoteWindow {
     status: row.status,
     winner: row.winner
   };
+}
+
+function roomIdFromMeta(meta: RoomMetaRow): string {
+  if (meta.room_id === null) throw new Error("room identity is not initialized");
+  return meta.room_id;
 }
 
 function mapEvent(row: GameEventRow): GameEvent {

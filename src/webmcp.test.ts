@@ -22,7 +22,7 @@ describe("WebMCP registration", () => {
       value: { registerTool }
     });
     const onStatus = vi.fn();
-    const dispose = registerRoomTools("main", onStatus, vi.fn());
+    const dispose = registerRoomTools("main", onStatus);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -39,7 +39,7 @@ describe("WebMCP registration", () => {
 
   it("reports when a browser does not provide WebMCP", () => {
     const onStatus = vi.fn();
-    registerRoomTools("main", onStatus, vi.fn());
+    registerRoomTools("main", onStatus);
     expect(onStatus).toHaveBeenCalledWith("unavailable");
   });
 
@@ -76,7 +76,7 @@ describe("WebMCP registration", () => {
     const fetch = vi.fn().mockResolvedValue(Response.json(game));
     vi.stubGlobal("fetch", fetch);
 
-    registerRoomTools("main", vi.fn(), vi.fn());
+    registerRoomTools("main", vi.fn());
     await Promise.resolve();
     await Promise.resolve();
     const result = await observeTool?.execute({});

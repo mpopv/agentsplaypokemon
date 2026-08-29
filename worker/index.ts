@@ -70,6 +70,100 @@ app.get("/health", (context) =>
   })
 );
 
+app.get("/public/room", (context) =>
+  context.json({ roomId: parseRoomId(context.env.DEFAULT_ROOM_ID) })
+);
+
+app.get("/public/rooms/:roomId/game", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(await context.env.GAME_ROOMS.getByName(roomId).spectate(roomId));
+});
+
+app.get("/public/rooms/:roomId/chat", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const after = parseCursor(context.req.query("after"));
+  const messages = await context.env.GAME_ROOMS.getByName(roomId).readPublicChat(roomId, after);
+  return context.json({ messages, cursor: messages.at(-1)?.sequence ?? after });
+});
+
+app.get("/public/rooms/:roomId/chat/history", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const before = parseOptionalCursor(context.req.query("before"));
+  return context.json(
+    await context.env.GAME_ROOMS.getByName(roomId).readChatHistory(roomId, null, before)
+  );
+});
+
+app.get("/public/rooms/:roomId/agents/:agentId", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const agentId = parseAgentId(context.req.param("agentId"));
+  return context.json(await readAgentProfile(context.env, roomId, agentId, null));
+});
+
+app.get("/public/rooms/:roomId/game/frame", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return gameFrameResponse(context.env, roomId);
+});
+
+app.get("/public/rooms/:roomId/game-socket", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return forwardPublicSocket(
+    context.req.raw,
+    context.env.GAME_ROOMS.getByName(roomId),
+    "/internal/public-game-socket",
+    roomId
+  );
+});
+
+app.get("/public/rooms/:roomId/game-stream", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return forwardPublicSocket(
+    context.req.raw,
+    context.env.GAME_ROOMS.getByName(roomId),
+    "/internal/public-game-stream",
+    roomId
+  );
+});
+
+app.get("/public/rooms/:roomId/computer", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const after = parseCursor(context.req.query("after"));
+  return context.json(await context.env.SHARED_COMPUTERS.getByName(roomId).overview(roomId, after));
+});
+
+app.get("/public/rooms/:roomId/computer/events", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const before = parseOptionalCursor(context.req.query("before"));
+  return context.json(
+    await context.env.SHARED_COMPUTERS.getByName(roomId).eventHistory(roomId, before)
+  );
+});
+
+app.get("/public/rooms/:roomId/computer/tree", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const path = parseWorkspacePath(context.req.query("path"));
+  return context.json({
+    path,
+    entries: await context.env.SHARED_COMPUTERS.getByName(roomId).tree(roomId, path)
+  });
+});
+
+app.get("/public/rooms/:roomId/computer/file", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  const path = parseWorkspacePath(context.req.query("path"));
+  return context.json(await context.env.SHARED_COMPUTERS.getByName(roomId).file(roomId, path));
+});
+
+app.get("/public/rooms/:roomId/computer-socket", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return forwardPublicSocket(
+    context.req.raw,
+    context.env.SHARED_COMPUTERS.getByName(roomId),
+    "/internal/public-computer-socket",
+    roomId
+  );
+});
+
 app.get("/ready", async (context) => {
   const startedAt = Date.now();
   const roomId = parseRoomId(context.env.DEFAULT_ROOM_ID);
@@ -167,74 +261,14 @@ app.post("/rooms/:roomId/chat", async (context) => {
 app.get("/rooms/:roomId/agents/:agentId", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const agentId = parseAgentId(context.req.param("agentId"));
-  const [gameActivity, computerActivity] = await Promise.all([
-    context.env.GAME_ROOMS.getByName(roomId).agentActivity(
-      roomId,
-      context.get("agent"),
-      agentId
-    ),
-    context.env.SHARED_COMPUTERS.getByName(roomId).agentActivity(roomId, agentId)
-  ]);
-  const displayName = gameActivity.displayName ?? computerActivity.displayName;
-  const firstRecordedAt = minimumTimestamp(
-    gameActivity.firstRecordedAt,
-    computerActivity.firstRecordedAt,
-    gameActivity.lastSeenAt
+  return context.json(
+    await readAgentProfile(context.env, roomId, agentId, context.get("agent"))
   );
-  const lastActiveAt = maximumTimestamp(
-    gameActivity.lastRecordedAt,
-    gameActivity.lastSeenAt,
-    computerActivity.lastRecordedAt
-  );
-  if (displayName === null || firstRecordedAt === null || lastActiveAt === null) {
-    throw new InputError("agent was not found in this room", 404);
-  }
-  const profile: AgentProfile = {
-    agentId,
-    displayName,
-    firstRecordedAt,
-    lastActiveAt,
-    online: gameActivity.online,
-    voteWindowCount: gameActivity.voteWindowCount,
-    chatMessageCount: gameActivity.chatMessageCount,
-    commandCount: computerActivity.commandCount,
-    lastVote: gameActivity.lastVote,
-    lastChat: gameActivity.lastChat,
-    lastCommand: computerActivity.lastCommand
-  };
-  return context.json(profile);
 });
 
 app.get("/rooms/:roomId/game/frame", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
-  const game = context.env.GAME_ROOMS.getByName(roomId);
-  const descriptor = await game.frameDescriptor(roomId);
-  if (descriptor.mode === "rom" && descriptor.frameKey) {
-    const frame = await context.env.PRIVATE_DATA.get(descriptor.frameKey);
-    if (frame !== null) {
-      return new Response(frame.body, {
-        headers: {
-          "content-type": frame.httpMetadata?.contentType ?? "image/png",
-          "cache-control": "private, max-age=2",
-          etag: frame.httpEtag
-        }
-      });
-    }
-  }
-  return new Response(
-    renderDemoFrame({
-      x: descriptor.demoX,
-      y: descriptor.demoY,
-      lastInput: descriptor.lastInput,
-      revision: descriptor.frameRevision
-    }),
-    {
-      headers: {
-        "content-type": "image/svg+xml; charset=utf-8",
-        "cache-control": "private, max-age=2"
-      }
-    }
-  );
+  return gameFrameResponse(context.env, roomId);
 });
 
 app.get("/rooms/:roomId/game-socket", async (context) => {
@@ -295,13 +329,6 @@ app.get("/rooms/:roomId/computer/file", async (context) => {
   const path = parseWorkspacePath(context.req.query("path"));
   const computer = context.env.SHARED_COMPUTERS.getByName(roomId);
   return context.json(await computer.file(roomId, path));
-});
-
-app.get("/rooms/:roomId/computer/history", async (context) => {
-  const roomId = parseRoomId(context.req.param("roomId"));
-  const path = parseWorkspacePath(context.req.query("path"));
-  const computer = context.env.SHARED_COMPUTERS.getByName(roomId);
-  return context.json({ path, history: await computer.history(roomId, path) });
 });
 
 app.get("/rooms/:roomId/computer-socket", async (context) => {
@@ -379,12 +406,56 @@ app.post("/admin/rooms/:roomId/computer/reset", async (context) => {
   return context.json(await context.env.SHARED_COMPUTERS.getByName(roomId).reset(roomId));
 });
 
+app.get("/admin/rooms/:roomId/computer/status", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(
+    context.env.SHARED_COMPUTERS.getByName(roomId).releaseStatus(roomId)
+  );
+});
+
+app.post("/admin/rooms/:roomId/computer/probe", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(await context.env.SHARED_COMPUTERS.getByName(roomId).deepProbe(roomId));
+});
+
+app.post("/admin/rooms/:roomId/computer/restart", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(
+    await context.env.SHARED_COMPUTERS.getByName(roomId).restartRuntime(roomId)
+  );
+});
+
+app.post("/admin/rooms/:roomId/game/checkpoint", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(await context.env.GAME_ROOMS.getByName(roomId).checkpoint(roomId));
+});
+
+app.post("/admin/rooms/:roomId/game/probe", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(await context.env.GAME_ROOMS.getByName(roomId).runtimeProbe(roomId));
+});
+
+app.post("/admin/rooms/:roomId/game/restart", async (context) => {
+  const roomId = parseRoomId(context.req.param("roomId"));
+  return context.json(await context.env.GAME_ROOMS.getByName(roomId).restartRuntime(roomId));
+});
+
 app.notFound(async (context) => {
   return context.env.ASSETS.fetch(context.req.raw);
 });
 
 app.onError((error, context) => {
   const status = error instanceof InputError ? error.status : readErrorStatus(error);
+  const overloaded = readBooleanProperty(error, "overloaded");
+  const retryable = readBooleanProperty(error, "retryable") && !overloaded;
+  const retryAfter = error instanceof InputError
+    ? error.retryAfterSeconds
+    : overloaded
+      ? 2
+      : null;
+  if (retryAfter !== null) context.header("retry-after", String(retryAfter));
+  if (overloaded) context.header("x-overloaded", "true");
+  if (retryable) context.header("x-retryable", "true");
   if (status >= 500) {
     console.error({
       message: "request failed",
@@ -393,7 +464,13 @@ app.onError((error, context) => {
     });
   }
   return context.json(
-    { error: error instanceof Error ? error.message : "request failed" },
+    {
+      error: overloaded
+        ? "the room is overloaded; retry after the service recovers"
+        : error instanceof Error
+          ? error.message
+          : "request failed"
+    },
     status as 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 503
   );
 });
@@ -410,11 +487,14 @@ export default {
   ): Promise<void> {
     const roomId = parseRoomId(env.DEFAULT_ROOM_ID);
     try {
-      await env.SHARED_COMPUTERS.getByName(roomId).snapshot(roomId, "automatic-15-minute");
-      console.log({ message: "automatic computer snapshot completed", roomId });
+      const [computer, game] = await Promise.all([
+        env.SHARED_COMPUTERS.getByName(roomId).automaticMaintenance(roomId),
+        env.GAME_ROOMS.getByName(roomId).maintain(roomId)
+      ]);
+      console.log({ message: "scheduled room maintenance completed", roomId, computer, game });
     } catch (error) {
       console.error({
-        message: "automatic computer snapshot failed",
+        message: "scheduled room maintenance failed",
         roomId,
         error: error instanceof Error ? error.message : String(error)
       });
@@ -457,6 +537,92 @@ async function forwardSocket(
   });
 }
 
+async function forwardPublicSocket(
+  request: Request,
+  stub: DurableObjectStub,
+  path: string,
+  roomId: string
+): Promise<Response> {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw new InputError("websocket upgrade required", 426);
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("authorization");
+  headers.delete("cookie");
+  headers.delete("sec-websocket-protocol");
+  headers.set("x-room-id", roomId);
+  return stub.fetch(new Request(`https://internal${path}`, { method: "GET", headers }));
+}
+
+async function gameFrameResponse(env: RuntimeEnv, roomId: string): Promise<Response> {
+  const descriptor = await env.GAME_ROOMS.getByName(roomId).frameDescriptor(roomId);
+  if (descriptor.mode === "rom" && descriptor.frameKey) {
+    const frame = await env.PRIVATE_DATA.get(descriptor.frameKey);
+    if (frame !== null) {
+      return new Response(frame.body, {
+        headers: {
+          "content-type": frame.httpMetadata?.contentType ?? "image/png",
+          "cache-control": "private, max-age=2",
+          etag: frame.httpEtag
+        }
+      });
+    }
+  }
+  return new Response(
+    renderDemoFrame({
+      x: descriptor.demoX,
+      y: descriptor.demoY,
+      lastInput: descriptor.lastInput,
+      revision: descriptor.frameRevision
+    }),
+    {
+      headers: {
+        "content-type": "image/svg+xml; charset=utf-8",
+        "cache-control": "private, max-age=2"
+      }
+    }
+  );
+}
+
+async function readAgentProfile(
+  env: RuntimeEnv,
+  roomId: string,
+  agentId: string,
+  viewer: AgentIdentity | null
+): Promise<AgentProfile> {
+  const [gameActivity, computerActivity] = await Promise.all([
+    env.GAME_ROOMS.getByName(roomId).agentActivity(roomId, viewer, agentId),
+    env.SHARED_COMPUTERS.getByName(roomId).agentActivity(roomId, agentId)
+  ]);
+  const displayName = gameActivity.displayName ?? computerActivity.displayName;
+  const firstRecordedAt = minimumTimestamp(
+    gameActivity.firstRecordedAt,
+    computerActivity.firstRecordedAt,
+    gameActivity.lastSeenAt
+  );
+  const lastActiveAt = maximumTimestamp(
+    gameActivity.lastRecordedAt,
+    gameActivity.lastSeenAt,
+    computerActivity.lastRecordedAt
+  );
+  if (displayName === null || firstRecordedAt === null || lastActiveAt === null) {
+    throw new InputError("agent was not found in this room", 404);
+  }
+  return {
+    agentId,
+    displayName,
+    firstRecordedAt,
+    lastActiveAt,
+    online: gameActivity.online,
+    voteWindowCount: gameActivity.voteWindowCount,
+    chatMessageCount: gameActivity.chatMessageCount,
+    commandCount: computerActivity.commandCount,
+    lastVote: gameActivity.lastVote,
+    lastChat: gameActivity.lastChat,
+    lastCommand: computerActivity.lastCommand
+  };
+}
+
 async function optionalJsonObject(request: Request): Promise<Record<string, unknown>> {
   if (!request.headers.get("content-length") || request.headers.get("content-length") === "0") {
     return {};
@@ -465,6 +631,9 @@ async function optionalJsonObject(request: Request): Promise<Record<string, unkn
 }
 
 function readErrorStatus(error: unknown): number {
+  if (readBooleanProperty(error, "overloaded") || readBooleanProperty(error, "retryable")) {
+    return 503;
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -476,6 +645,15 @@ function readErrorStatus(error: unknown): number {
     return error.status;
   }
   return 500;
+}
+
+function readBooleanProperty(error: unknown, key: "overloaded" | "retryable"): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    key in error &&
+    (error as Record<string, unknown>)[key] === true
+  );
 }
 
 function minimumTimestamp(...values: Array<number | null>): number | null {

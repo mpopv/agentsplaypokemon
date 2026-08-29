@@ -13,14 +13,18 @@
     "dev": "npm run build && wrangler dev --port 8787",
     "dev:web": "vite",
     "dev:worker": "wrangler dev --port 8787",
-    "test": "vitest run && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s containers/game -p '*_test.py'",
+    "test": "vitest run && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s containers/game -p '*_test.py' && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s containers/computer -p '*_test.py'",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "types": "wrangler types",
     "canary": "node scripts/canary.mjs",
+    "canary:deep": "node scripts/canary.mjs --deep",
     "release:worker:candidate": "node scripts/assert-clean.mjs && npm run check && node scripts/release-worker.mjs candidate",
     "release:worker:promote": "node scripts/release-worker.mjs promote",
-    "release:containers": "node scripts/assert-clean.mjs && npm run check && wrangler deploy --containers-rollout=gradual"
+    "release:containers": "node scripts/release-containers.mjs",
+    "test:cold-start": "node scripts/cold-start-test.mjs",
+    "test:load": "node scripts/load-test.mjs",
+    "test:stream-soak": "node scripts/stream-soak.mjs"
   },
   "dependencies": {
     "@cloudflare/computer": "0.2.1",

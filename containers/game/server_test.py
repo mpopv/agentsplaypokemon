@@ -185,6 +185,24 @@ class FrameBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(socket.frames, [b"png-frame"])
         await broadcaster.stop()
 
+    async def test_consistently_slow_client_is_closed(self) -> None:
+        source = FakeFrameSource()
+        broadcaster = server.FrameBroadcaster(
+            source,
+            party_sample_interval_seconds=0,
+            send_timeout_seconds=0.01,
+        )
+        socket = FakeSocket(blocked=True)
+        broadcaster.add(socket)
+
+        self.assertTrue(await broadcaster.broadcast_once())
+        await socket.started.wait()
+        await asyncio.sleep(0.03)
+
+        self.assertTrue(socket.closed)
+        self.assertNotIn(socket, broadcaster.clients)
+        await broadcaster.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

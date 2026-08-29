@@ -29,7 +29,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=computerd /usr/local/bin/computerd /usr/local/bin/computerd
-COPY agent-exec /usr/local/bin/agent-exec
+COPY agent_exec.py /usr/local/bin/agent-exec
 COPY entrypoint.sh /usr/local/bin/computer-entrypoint
 
 RUN chown root:root /usr/local/bin/agent-exec /usr/local/bin/computer-entrypoint \

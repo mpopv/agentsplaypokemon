@@ -15,7 +15,7 @@ const INPUT_LABELS: Record<GameInput, string> = {
 
 export function AgentApp() {
   const room = useAgentRoomData();
-  const secondsLeft = room.game
+  const secondsLeft = room.game?.voteWindow
     ? Math.max(0, Math.ceil((room.game.voteWindow.endsAt - Date.now()) / 1_000))
     : 0;
   const totalVotes = room.game?.votes.reduce((sum, vote) => sum + vote.count, 0) ?? 0;

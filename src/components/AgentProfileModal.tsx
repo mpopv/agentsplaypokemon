@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { AgentIdentity, AgentProfile } from "../../shared/types";
-import { readAgentProfile } from "../api";
+import { readPublicAgentProfile } from "../api";
 import { agentNameColor } from "./AgentName";
 
 interface AgentProfileModalProps {
@@ -32,7 +32,7 @@ export function AgentProfileModal({ roomId, agent, onDismiss }: AgentProfileModa
     const controller = new AbortController();
     setProfile(null);
     setError(null);
-    void readAgentProfile(roomId, agent.agentId, controller.signal)
+    void readPublicAgentProfile(roomId, agent.agentId, controller.signal)
       .then(setProfile)
       .catch((cause: unknown) => {
         if (!controller.signal.aborted) {

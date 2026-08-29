@@ -20,14 +20,21 @@ import type {
   ComputerEvent,
   ComputerEventHistoryPage,
   ComputerExecResult,
-  ComputerFileHistoryEntry,
   ComputerFileView,
   ComputerOverview,
+  ComputerReleaseStatus,
+  ComputerRuntimeProbe,
   ComputerSnapshot,
   ComputerTreeEntry,
   SocketEnvelope
 } from "../shared/types";
 import { bytesToBase64, readStream, safeTextPreview } from "./lib/encoding";
+import {
+  BackendCircuitBreaker,
+  CommandAdmission,
+  extractProcessMetrics,
+  isBackendFailure
+} from "./lib/command-guard";
 import { makeHistoryPage } from "./lib/history-page";
 import { InputError, parseCommand, parseWorkspacePath } from "./lib/validation";
 
@@ -60,26 +67,6 @@ interface ComputerActivityAggregateRow {
   last_at: number | null;
 }
 
-interface FileIndexRow {
-  [key: string]: SqlStorageValue;
-  path: string;
-  type: "file" | "directory" | "symlink";
-  size: number;
-  mtime: number;
-}
-
-interface FileHistoryRow {
-  [key: string]: SqlStorageValue;
-  sequence: number;
-  path: string;
-  operation: "created" | "updated" | "deleted";
-  size: number;
-  mtime: number;
-  filesystem_revision: number;
-  preview: string | null;
-  created_at: number;
-}
-
 interface SnapshotManifestEntry {
   path: string;
   type: "file" | "directory" | "symlink";
@@ -100,12 +87,24 @@ interface SnapshotManifest {
 }
 
 const MAX_FILE_VIEW_BYTES = 1024 * 1024;
-const MAX_HISTORY_FILE_BYTES = 256 * 1024;
-const MAX_TRACKED_ENTRIES = 2_000;
 const MAX_SNAPSHOT_ENTRIES = 5_000;
 const MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024;
 const EXEC_RATE_LIMIT_MS = 1_000;
 const COMPUTER_EVENT_HISTORY_PAGE_SIZE = 20;
+const AUTOMATIC_SNAPSHOT_IDLE_DELAY_MS = 1_000;
+const AUTOMATIC_SNAPSHOT_RETENTION_MS = 3 * 24 * 60 * 60 * 1_000;
+const MANUAL_SNAPSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const COMPUTER_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const TOMBSTONE_ALERT_THRESHOLD = 10_000;
+
+function computerContainerEnv(env: Env): Record<string, string> {
+  return {
+    COMPUTER_VAR_COMPUTER_OUTPUT_LIMIT_BYTES: env.COMPUTER_OUTPUT_LIMIT_BYTES,
+    COMPUTER_VAR_COMPUTER_EXEC_TIMEOUT_SECONDS: String(
+      Math.max(1, Math.floor(Number(env.COMPUTER_EXEC_TIMEOUT_MS) / 1000) - 1)
+    )
+  };
+}
 
 class SharedComputerContainerBase extends withWorkspaceContainer(
   class extends DurableObject<Env> {}
@@ -114,12 +113,7 @@ class SharedComputerContainerBase extends withWorkspaceContainer(
     container: () => this,
     workspace: { binding: "SHARED_COMPUTERS", id: this.ctx.id.toString() },
     egress: { mode: "none" },
-    containerEnv: {
-      COMPUTER_VAR_COMPUTER_OUTPUT_LIMIT_BYTES: this.env.COMPUTER_OUTPUT_LIMIT_BYTES,
-      COMPUTER_VAR_COMPUTER_EXEC_TIMEOUT_SECONDS: String(
-        Math.max(1, Math.floor(Number(this.env.COMPUTER_EXEC_TIMEOUT_MS) / 1000) - 1)
-      )
-    }
+    containerEnv: computerContainerEnv(this.env)
   });
 
   workspaceContext(): DurableObjectState {
@@ -142,6 +136,9 @@ export class SharedComputerDO extends withWorkspace(
   workspaceOptions
 ) {
   private executionTail: Promise<void> = Promise.resolve();
+  private readonly admission = new CommandAdmission(4);
+  private readonly circuit = new BackendCircuitBreaker(2, 30_000);
+  private snapshotRunning = false;
 
   constructor(ctx: DurableObjectState<{}>, env: Env) {
     super(ctx, env);
@@ -156,13 +153,29 @@ export class SharedComputerDO extends withWorkspace(
   ): Promise<ComputerExecResult> {
     const command = parseCommand(commandValue);
     const cwd = parseWorkspacePath(cwdValue);
-    return this.serialized(async () => {
-      this.identify(roomId);
-      await this.ensureInitialized(roomId);
+    this.identify(roomId);
+    this.circuit.assertAvailable();
+    const accepted = this.admission.admit(agent.agentId);
+    try {
       this.enforceExecRateLimit(agent.agentId);
-      const startedAt = Date.now();
+    } catch (error) {
+      accepted.release();
+      throw error;
+    }
+    const acceptedAt = Date.now();
+
+    try {
+      return await this.serialized(async () => {
+        await this.ensureInitialized(roomId);
+        const startedAt = Date.now();
+        let workspaceAcquireMs = 0;
+        let containerConnectMs = 0;
+        let commandMs = 0;
       try {
+        const workspaceStartedAt = Date.now();
         using workspace = await getWorkspace(this);
+        workspaceAcquireMs = Date.now() - workspaceStartedAt;
+        const containerStartedAt = Date.now();
         using run = await workspace.runtime.exec(
           `/usr/local/bin/agent-exec ${shellQuote(command)}`,
           {
@@ -171,39 +184,54 @@ export class SharedComputerDO extends withWorkspace(
             timeoutMs: Number(this.env.COMPUTER_EXEC_TIMEOUT_MS) + 2_000
           }
         );
+        containerConnectMs = Date.now() - containerStartedAt;
+        const commandStartedAt = Date.now();
         const result = await run.result();
-        const filesystemRevision = this.advanceRevision();
-        try {
-          await this.captureFileHistory(workspace, roomId, filesystemRevision);
-        } catch (error) {
-          this.appendEvent({
-            agent: { agentId: "system", displayName: "System" },
-            eventType: "history.error",
-            command: null,
-            exitCode: null,
-            stdoutPreview: null,
-            stderrPreview: error instanceof Error ? error.message : String(error),
-            filesystemRevision
-          });
-        }
+        commandMs = Date.now() - commandStartedAt;
+        const parsed = extractProcessMetrics(result.stderr);
+        const filesystemRevision = result.pulled > 0
+          ? this.advanceRevision()
+          : this.readMeta().filesystem_revision;
         const event = this.appendEvent({
           agent,
           eventType: "exec",
           command,
           exitCode: result.exitCode,
           stdoutPreview: result.stdout.slice(0, 2_048),
-          stderrPreview: result.stderr.slice(0, 2_048),
+          stderrPreview: parsed.stderr.slice(0, 2_048),
           filesystemRevision
         });
         this.broadcast("exec.completed", event);
+        this.circuit.recordSuccess();
+        console.log({
+          message: "computer exec completed",
+          requestId: crypto.randomUUID(),
+          agentIdHash: await shortHash(agent.agentId),
+          queueDepthAtArrival: accepted.depthAtArrival,
+          queueWaitMs: startedAt - acceptedAt,
+          workspaceAcquireMs,
+          containerConnectMs,
+          commandMs,
+          syncMs: 0,
+          filesystemRevision,
+          filesystemEntries: parsed.metrics?.filesystemEntries ?? null,
+          filesystemBytes: parsed.metrics?.filesystemBytes ?? null,
+          stdoutProducedBytes: parsed.metrics?.stdoutProducedBytes ?? null,
+          stderrProducedBytes: parsed.metrics?.stderrProducedBytes ?? null,
+          stdoutReturnedBytes: parsed.metrics?.stdoutReturnedBytes ?? result.stdout.length,
+          stderrReturnedBytes: parsed.metrics?.stderrReturnedBytes ?? parsed.stderr.length,
+          totalMs: Date.now() - acceptedAt,
+          status: "completed"
+        });
         return {
           exitCode: result.exitCode,
           stdout: result.stdout,
-          stderr: result.stderr,
+          stderr: parsed.stderr,
           durationMs: Date.now() - startedAt,
           filesystemRevision
         };
       } catch (error) {
+        if (isBackendFailure(error)) this.circuit.recordFailure();
         const filesystemRevision = this.readMeta().filesystem_revision;
         const message = error instanceof Error ? error.message : String(error);
         const event = this.appendEvent({
@@ -216,9 +244,26 @@ export class SharedComputerDO extends withWorkspace(
           filesystemRevision
         });
         this.broadcast("exec.error", event);
+        console.error({
+          message: "computer exec failed",
+          queueDepthAtArrival: accepted.depthAtArrival,
+          queueWaitMs: startedAt - acceptedAt,
+          workspaceAcquireMs,
+          containerConnectMs,
+          commandMs,
+          totalMs: Date.now() - acceptedAt,
+          status: "failed",
+          errorName: error instanceof Error ? error.name : "Error",
+          errorMessage: message,
+          overloaded: readBooleanProperty(error, "overloaded"),
+          retryable: readBooleanProperty(error, "retryable")
+        });
         throw error;
       }
-    });
+      });
+    } finally {
+      accepted.release();
+    }
   }
 
   async overview(roomId: string, after = 0): Promise<ComputerOverview> {
@@ -269,6 +314,19 @@ export class SharedComputerDO extends withWorkspace(
 
   agentActivity(roomId: string, agentId: string): ComputerAgentActivity {
     this.identify(roomId);
+    const summary = this.ctx.storage.sql
+      .exec<{
+        display_name: string;
+        command_count: number;
+        first_recorded_at: number | null;
+        last_recorded_at: number | null;
+      }>(
+        `SELECT display_name, command_count, first_recorded_at, last_recorded_at
+         FROM computer_agent_summaries
+         WHERE agent_id = ?`,
+        agentId
+      )
+      .toArray()[0];
     const stats = this.ctx.storage.sql
       .exec<ComputerActivityAggregateRow>(
         `SELECT COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
@@ -290,10 +348,10 @@ export class SharedComputerDO extends withWorkspace(
       .toArray()[0];
 
     return {
-      displayName: last?.display_name ?? null,
-      firstRecordedAt: stats.first_at,
-      lastRecordedAt: stats.last_at,
-      commandCount: Number(stats.count),
+      displayName: last?.display_name ?? summary?.display_name ?? null,
+      firstRecordedAt: minimumTimestamp(summary?.first_recorded_at, stats.first_at),
+      lastRecordedAt: maximumTimestamp(summary?.last_recorded_at, stats.last_at),
+      commandCount: Number(summary?.command_count ?? 0) + Number(stats.count),
       lastCommand:
         last?.command !== null && last?.command !== undefined
           ? {
@@ -356,102 +414,45 @@ export class SharedComputerDO extends withWorkspace(
     };
   }
 
-  history(roomId: string, pathValue: unknown): ComputerFileHistoryEntry[] {
+  async snapshot(roomId: string, reason: string): Promise<ComputerSnapshot> {
     this.identify(roomId);
-    const path = parseWorkspacePath(pathValue);
-    return this.ctx.storage.sql
-      .exec<FileHistoryRow>(
-        `SELECT sequence, path, operation, size, mtime, filesystem_revision, preview, created_at
-         FROM file_history
-         WHERE path = ?
-         ORDER BY sequence DESC
-         LIMIT 100`,
-        path
-      )
-      .toArray()
-      .map(mapFileHistory);
+    if (this.snapshotRunning) throw new InputError("a snapshot is already running", 409);
+    this.snapshotRunning = true;
+    try {
+      return await this.serialized(() => this.createSnapshot(roomId, reason));
+    } finally {
+      this.snapshotRunning = false;
+    }
   }
 
-  async snapshot(roomId: string, reason: string): Promise<ComputerSnapshot> {
-    return this.serialized(async () => {
-      this.identify(roomId);
-      await this.ensureInitialized(roomId);
-      using workspace = await getWorkspace(this);
-      const found = await workspace.fs.find("/workspace", undefined, {
-        limit: MAX_SNAPSHOT_ENTRIES + 1
-      });
-      if (found.length > MAX_SNAPSHOT_ENTRIES) {
-        throw new InputError(`snapshot contains more than ${MAX_SNAPSHOT_ENTRIES} entries`, 413);
-      }
-      const snapshotId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto
-        .randomUUID()
-        .slice(0, 8)}`;
-      const createdAt = Date.now();
-      const filesystemRevision = this.readMeta().filesystem_revision;
-      const entries: SnapshotManifestEntry[] = [];
-      let totalBytes = 0;
-
-      for (const foundEntry of found) {
-        const stat = await workspace.fs.lstat(foundEntry.path);
-        const type = stat.isSymbolicLink
-          ? ("symlink" as const)
-          : stat.isDirectory
-            ? ("directory" as const)
-            : ("file" as const);
-        const entry: SnapshotManifestEntry = {
-          path: foundEntry.path,
-          type,
-          size: stat.size,
-          mode: stat.mode,
-          mtime: stat.mtime
-        };
-        if (type === "file") {
-          totalBytes += stat.size;
-          if (totalBytes > MAX_SNAPSHOT_BYTES) {
-            throw new InputError("snapshot is larger than 100 MiB", 413);
-          }
-          entry.objectKey = snapshotFileKey(roomId, snapshotId, foundEntry.path);
-          const stream = await workspace.fs.readFile(foundEntry.path);
-          await putKnownLength(this.env.PRIVATE_DATA, entry.objectKey, stream, stat.size);
-        } else if (type === "symlink") {
-          entry.target = await workspace.fs.readlink(foundEntry.path);
+  async automaticMaintenance(roomId: string): Promise<{
+    snapshot: ComputerSnapshot | { skipped: true; reason: string };
+    deletedSnapshots: number;
+    deletedEvents: number;
+    tombstones: number;
+  }> {
+    this.identify(roomId);
+    let snapshot: ComputerSnapshot | { skipped: true; reason: string };
+    if (this.admission.queueDepth > 0 || this.snapshotRunning) {
+      snapshot = { skipped: true, reason: "computer-busy" };
+    } else {
+      this.snapshotRunning = true;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, AUTOMATIC_SNAPSHOT_IDLE_DELAY_MS));
+        if (this.admission.queueDepth > 0) {
+          snapshot = { skipped: true, reason: "command-arrived" };
+        } else if (this.latestSnapshotRevision() === this.readMeta().filesystem_revision) {
+          snapshot = { skipped: true, reason: "filesystem-unchanged" };
+        } else {
+          snapshot = await this.serialized(() => this.createSnapshot(roomId, "automatic-hourly"));
         }
-        entries.push(entry);
+      } finally {
+        this.snapshotRunning = false;
       }
+    }
 
-      const manifest: SnapshotManifest = {
-        version: 1,
-        roomId,
-        snapshotId,
-        filesystemRevision,
-        createdAt,
-        entries
-      };
-      const manifestKey = snapshotManifestKey(roomId, snapshotId);
-      await this.env.PRIVATE_DATA.put(manifestKey, JSON.stringify(manifest), {
-        httpMetadata: { contentType: "application/json" }
-      });
-      this.ctx.storage.sql.exec(
-        `INSERT INTO snapshots
-          (snapshot_id, manifest_key, reason, filesystem_revision, file_count, total_bytes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        snapshotId,
-        manifestKey,
-        reason.slice(0, 200),
-        filesystemRevision,
-        entries.filter((entry) => entry.type === "file").length,
-        totalBytes,
-        createdAt
-      );
-      this.appendAdminEvent("snapshot.created", snapshotId, filesystemRevision);
-      return {
-        snapshotId,
-        filesystemRevision,
-        fileCount: entries.filter((entry) => entry.type === "file").length,
-        totalBytes,
-        createdAt
-      };
-    });
+    const retention = await this.runRetention(roomId);
+    return { snapshot, ...retention };
   }
 
   async restore(roomId: string, snapshotId: string): Promise<ComputerSnapshot> {
@@ -503,13 +504,14 @@ export class SharedComputerDO extends withWorkspace(
       }
 
       const filesystemRevision = this.advanceRevision();
-      await this.captureFileHistory(workspace, roomId, filesystemRevision);
       this.appendAdminEvent("snapshot.restored", snapshotId, filesystemRevision);
       return {
         snapshotId,
         filesystemRevision,
         fileCount: snapshot.file_count,
         totalBytes: snapshot.total_bytes,
+        uploadedFileCount: 0,
+        uploadedBytes: 0,
         createdAt: snapshot.created_at
       };
     });
@@ -523,25 +525,102 @@ export class SharedComputerDO extends withWorkspace(
       await this.seedWorkspace(workspace);
       this.ctx.storage.sql.exec("UPDATE computer_meta SET initialized = 1 WHERE id = 1");
       const filesystemRevision = this.advanceRevision();
-      await this.captureFileHistory(workspace, roomId, filesystemRevision);
       this.appendAdminEvent("workspace.reset", null, filesystemRevision);
       return { filesystemRevision };
     });
   }
 
+  releaseStatus(roomId: string): ComputerReleaseStatus {
+    this.identify(roomId);
+    return {
+      queueDepth: this.admission.queueDepth,
+      snapshotRunning: this.snapshotRunning,
+      circuitOpenUntil: this.circuit.circuitOpenUntil
+    };
+  }
+
+  async deepProbe(roomId: string): Promise<ComputerRuntimeProbe> {
+    this.identify(roomId);
+    if (this.admission.queueDepth > 0 || this.snapshotRunning) {
+      throw new InputError("the shared computer is busy; retry the probe shortly", 503, 2);
+    }
+    this.circuit.assertAvailable();
+    const startedAt = Date.now();
+    let workspaceAcquireMs = 0;
+    let containerConnectMs = 0;
+    let commandMs = 0;
+    try {
+      const workspaceStartedAt = Date.now();
+      using workspace = await getWorkspace(this);
+      workspaceAcquireMs = Date.now() - workspaceStartedAt;
+      const containerStartedAt = Date.now();
+      using run = await workspace.runtime.exec("true", {
+        cwd: "/workspace",
+        encoding: "utf8",
+        timeoutMs: Number(this.env.COMPUTER_EXEC_TIMEOUT_MS) + 2_000
+      });
+      containerConnectMs = Date.now() - containerStartedAt;
+      const commandStartedAt = Date.now();
+      const result = await run.result();
+      commandMs = Date.now() - commandStartedAt;
+      if (result.exitCode !== 0) throw new Error(`deep probe exited with ${result.exitCode}`);
+      this.circuit.recordSuccess();
+      const probe = {
+        ok: true as const,
+        workspaceAcquireMs,
+        containerConnectMs,
+        commandMs,
+        totalMs: Date.now() - startedAt
+      };
+      console.log({ message: "computer deep probe completed", ...probe });
+      return probe;
+    } catch (error) {
+      if (isBackendFailure(error)) this.circuit.recordFailure();
+      console.error({
+        message: "computer deep probe failed",
+        workspaceAcquireMs,
+        containerConnectMs,
+        commandMs,
+        totalMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  async restartRuntime(roomId: string): Promise<ComputerRuntimeProbe> {
+    this.identify(roomId);
+    if (this.admission.queueDepth > 0 || this.snapshotRunning) {
+      throw new InputError("the shared computer must be idle before restart", 409);
+    }
+    const container = this.getWorkspaceContainer();
+    await container.restart(computerContainerEnv(this.env), false);
+    this.circuit.recordSuccess();
+    return this.deepProbe(roomId);
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === "/ws") return this.backend.handleFetch(request);
-    if (path !== "/internal/computer-socket") return new Response("not found", { status: 404 });
+    if (
+      path !== "/internal/computer-socket" &&
+      path !== "/internal/public-computer-socket"
+    ) {
+      return new Response("not found", { status: 404 });
+    }
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("websocket upgrade required", { status: 426 });
     }
     const agentId = request.headers.get("x-agent-id");
-    if (!agentId) return new Response("unauthorized", { status: 401 });
+    const isPublic = path === "/internal/public-computer-socket";
+    if (!isPublic && !agentId) return new Response("unauthorized", { status: 401 });
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
-    this.ctx.acceptWebSocket(server, ["computer", `agent:${agentId}`]);
+    this.ctx.acceptWebSocket(
+      server,
+      isPublic ? ["computer"] : ["computer", `agent:${agentId}`]
+    );
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -586,26 +665,6 @@ export class SharedComputerDO extends withWorkspace(
         last_exec_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS file_index (
-        path TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        size INTEGER NOT NULL,
-        mtime INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS file_history (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        path TEXT NOT NULL,
-        operation TEXT NOT NULL CHECK (operation IN ('created', 'updated', 'deleted')),
-        size INTEGER NOT NULL,
-        mtime INTEGER NOT NULL,
-        filesystem_revision INTEGER NOT NULL,
-        preview TEXT,
-        object_key TEXT,
-        created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS file_history_path ON file_history(path, sequence DESC);
-
       CREATE TABLE IF NOT EXISTS snapshots (
         snapshot_id TEXT PRIMARY KEY,
         manifest_key TEXT NOT NULL,
@@ -614,6 +673,22 @@ export class SharedComputerDO extends withWorkspace(
         file_count INTEGER NOT NULL,
         total_bytes INTEGER NOT NULL,
         created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS snapshot_objects (
+        snapshot_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        PRIMARY KEY (snapshot_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS snapshot_objects_key ON snapshot_objects(object_key);
+
+      CREATE TABLE IF NOT EXISTS computer_agent_summaries (
+        agent_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        command_count INTEGER NOT NULL,
+        first_recorded_at INTEGER,
+        last_recorded_at INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS computer_admin_events (
@@ -643,7 +718,7 @@ export class SharedComputerDO extends withWorkspace(
     return this.ctx.storage.sql.exec<ComputerMetaRow>("SELECT * FROM computer_meta WHERE id = 1").one();
   }
 
-  private async ensureInitialized(roomId: string): Promise<void> {
+  private async ensureInitialized(_roomId: string): Promise<void> {
     const meta = this.readMeta();
     if (meta.initialized === 1) return;
     using workspace = await getWorkspace(this);
@@ -652,7 +727,6 @@ export class SharedComputerDO extends withWorkspace(
       "UPDATE computer_meta SET initialized = 1, updated_at = ? WHERE id = 1",
       Date.now()
     );
-    await this.captureFileHistory(workspace, roomId, meta.filesystem_revision);
   }
 
   private async seedWorkspace(workspace: WorkspaceClient): Promise<void> {
@@ -679,7 +753,7 @@ export class SharedComputerDO extends withWorkspace(
       )
       .toArray()[0];
     if (last && now - last.last_exec_at < EXEC_RATE_LIMIT_MS) {
-      throw new InputError("wait one second before you run another command", 429);
+      throw new InputError("wait one second before you run another command", 429, 1);
     }
     this.ctx.storage.sql.exec(
       `INSERT INTO exec_rate_limits (agent_id, last_exec_at)
@@ -702,91 +776,266 @@ export class SharedComputerDO extends withWorkspace(
       .one().filesystem_revision;
   }
 
-  private async captureFileHistory(
-    workspace: WorkspaceClient,
-    roomId: string,
-    filesystemRevision: number
-  ): Promise<void> {
-    const found = await workspace.fs.find("/workspace", undefined, {
-      limit: MAX_TRACKED_ENTRIES + 1
-    });
-    const truncated = found.length > MAX_TRACKED_ENTRIES;
-    const visible = truncated ? found.slice(0, MAX_TRACKED_ENTRIES) : found;
-    const previous = new Map(
-      this.ctx.storage.sql
-        .exec<FileIndexRow>("SELECT path, type, size, mtime FROM file_index")
-        .toArray()
-        .map((row) => [row.path, row])
-    );
-    const current = new Set<string>();
+  private latestSnapshotRevision(): number | null {
+    return this.ctx.storage.sql
+      .exec<{ filesystem_revision: number }>(
+        "SELECT filesystem_revision FROM snapshots ORDER BY created_at DESC LIMIT 1"
+      )
+      .toArray()[0]?.filesystem_revision ?? null;
+  }
 
-    for (const entry of visible) {
-      const stat = await workspace.fs.lstat(entry.path);
+  private async createSnapshot(roomId: string, reason: string): Promise<ComputerSnapshot> {
+    const startedAt = Date.now();
+    await this.ensureInitialized(roomId);
+    using workspace = await getWorkspace(this);
+    const found = await workspace.fs.find("/workspace", undefined, {
+      limit: MAX_SNAPSHOT_ENTRIES + 1
+    });
+    if (found.length > MAX_SNAPSHOT_ENTRIES) {
+      throw new InputError(`snapshot contains more than ${MAX_SNAPSHOT_ENTRIES} entries`, 413);
+    }
+    const snapshotId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto
+      .randomUUID()
+      .slice(0, 8)}`;
+    const createdAt = Date.now();
+    const filesystemRevision = this.readMeta().filesystem_revision;
+    const previous = await this.latestSnapshotManifest();
+    const previousByPath = new Map(previous?.entries.map((entry) => [entry.path, entry]) ?? []);
+    const entries: SnapshotManifestEntry[] = [];
+    let totalBytes = 0;
+    let uploadedFileCount = 0;
+    let uploadedBytes = 0;
+
+    for (const foundEntry of found) {
+      const stat = await workspace.fs.lstat(foundEntry.path);
       const type = stat.isSymbolicLink
         ? ("symlink" as const)
         : stat.isDirectory
           ? ("directory" as const)
           : ("file" as const);
-      current.add(entry.path);
-      const old = previous.get(entry.path);
-      const changed = !old || old.type !== type || old.size !== stat.size || old.mtime !== stat.mtime;
-      if (changed) {
-        const operation = old ? ("updated" as const) : ("created" as const);
-        let preview: string | null = type === "directory" ? "[directory]" : null;
-        let objectKey: string | null = null;
-        if (type === "symlink") {
-          preview = `[symlink -> ${await workspace.fs.readlink(entry.path)}]`;
-        } else if (type === "file") {
-          const length = Math.min(stat.size, MAX_HISTORY_FILE_BYTES);
-          const stream = await workspace.fs.readFile(entry.path, { byteLength: length });
-          const bytes = await readStream(stream);
-          preview = safeTextPreview(bytes);
-          if (stat.size <= MAX_HISTORY_FILE_BYTES) {
-            objectKey = historyObjectKey(roomId, filesystemRevision, entry.path);
-            await this.env.PRIVATE_DATA.put(objectKey, bytes);
-          }
-        }
-        this.ctx.storage.sql.exec(
-          `INSERT INTO file_history
-            (path, operation, size, mtime, filesystem_revision, preview, object_key, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          entry.path,
-          operation,
-          stat.size,
-          stat.mtime,
-          filesystemRevision,
-          preview,
-          objectKey,
-          Date.now()
-        );
-      }
-      this.ctx.storage.sql.exec(
-        `INSERT INTO file_index (path, type, size, mtime)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(path) DO UPDATE SET type = excluded.type, size = excluded.size, mtime = excluded.mtime`,
-        entry.path,
+      const entry: SnapshotManifestEntry = {
+        path: foundEntry.path,
         type,
-        stat.size,
-        stat.mtime
-      );
+        size: stat.size,
+        mode: stat.mode,
+        mtime: stat.mtime
+      };
+      if (type === "file") {
+        totalBytes += stat.size;
+        if (totalBytes > MAX_SNAPSHOT_BYTES) {
+          throw new InputError("snapshot is larger than 100 MiB", 413);
+        }
+        const old = previousByPath.get(foundEntry.path);
+        if (old?.type === "file" && old.size === stat.size && old.mtime === stat.mtime && old.objectKey) {
+          entry.objectKey = old.objectKey;
+        } else {
+          entry.objectKey = snapshotFileKey(roomId, snapshotId, foundEntry.path);
+          const stream = await workspace.fs.readFile(foundEntry.path);
+          await putKnownLength(this.env.PRIVATE_DATA, entry.objectKey, stream, stat.size);
+          uploadedFileCount += 1;
+          uploadedBytes += stat.size;
+        }
+      } else if (type === "symlink") {
+        entry.target = await workspace.fs.readlink(foundEntry.path);
+      }
+      entries.push(entry);
     }
 
-    if (!truncated) {
-      for (const [path, old] of previous) {
-        if (current.has(path)) continue;
-        this.ctx.storage.sql.exec(
-          `INSERT INTO file_history
-            (path, operation, size, mtime, filesystem_revision, preview, object_key, created_at)
-           VALUES (?, 'deleted', ?, ?, ?, NULL, NULL, ?)`,
-          path,
-          old.size,
-          old.mtime,
-          filesystemRevision,
-          Date.now()
-        );
-        this.ctx.storage.sql.exec("DELETE FROM file_index WHERE path = ?", path);
-      }
+    const manifest: SnapshotManifest = {
+      version: 1,
+      roomId,
+      snapshotId,
+      filesystemRevision,
+      createdAt,
+      entries
+    };
+    const manifestKey = snapshotManifestKey(roomId, snapshotId);
+    await this.env.PRIVATE_DATA.put(manifestKey, JSON.stringify(manifest), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    const fileEntries = entries.filter(
+      (entry): entry is SnapshotManifestEntry & { objectKey: string } =>
+        entry.type === "file" && entry.objectKey !== undefined
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT INTO snapshots
+        (snapshot_id, manifest_key, reason, filesystem_revision, file_count, total_bytes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      snapshotId,
+      manifestKey,
+      reason.slice(0, 200),
+      filesystemRevision,
+      fileEntries.length,
+      totalBytes,
+      createdAt
+    );
+    for (const entry of fileEntries) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO snapshot_objects (snapshot_id, path, object_key)
+         VALUES (?, ?, ?)`,
+        snapshotId,
+        entry.path,
+        entry.objectKey
+      );
     }
+    this.appendAdminEvent("snapshot.created", snapshotId, filesystemRevision);
+    console.log({
+      message: "computer snapshot completed",
+      reason,
+      filesystemRevision,
+      fileCount: fileEntries.length,
+      totalBytes,
+      r2PutCount: uploadedFileCount + 1,
+      r2PutBytes: uploadedBytes,
+      durationMs: Date.now() - startedAt
+    });
+    return {
+      snapshotId,
+      filesystemRevision,
+      fileCount: fileEntries.length,
+      totalBytes,
+      uploadedFileCount,
+      uploadedBytes,
+      createdAt
+    };
+  }
+
+  private async latestSnapshotManifest(): Promise<SnapshotManifest | null> {
+    const row = this.ctx.storage.sql
+      .exec<{ manifest_key: string }>(
+        "SELECT manifest_key FROM snapshots ORDER BY created_at DESC LIMIT 1"
+      )
+      .toArray()[0];
+    if (!row) return null;
+    const object = await this.env.PRIVATE_DATA.get(row.manifest_key);
+    if (object === null) return null;
+    const manifest = (await object.json()) as SnapshotManifest;
+    return manifest.version === 1 ? manifest : null;
+  }
+
+  private async runRetention(roomId: string): Promise<{
+    deletedSnapshots: number;
+    deletedEvents: number;
+    tombstones: number;
+  }> {
+    const now = Date.now();
+    const eventCutoff = now - COMPUTER_EVENT_RETENTION_MS;
+    const oldAgents = this.ctx.storage.sql
+      .exec<{
+        agent_id: string;
+        display_name: string;
+        command_count: number;
+        first_at: number;
+        last_at: number;
+      }>(
+        `SELECT agent_id, MAX(display_name) AS display_name, COUNT(*) AS command_count,
+                MIN(created_at) AS first_at, MAX(created_at) AS last_at
+         FROM computer_events
+         WHERE created_at < ? AND agent_id != 'system'
+         GROUP BY agent_id`,
+        eventCutoff
+      )
+      .toArray();
+    for (const agent of oldAgents) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO computer_agent_summaries
+          (agent_id, display_name, command_count, first_recorded_at, last_recorded_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           display_name = excluded.display_name,
+           command_count = computer_agent_summaries.command_count + excluded.command_count,
+           first_recorded_at = MIN(computer_agent_summaries.first_recorded_at, excluded.first_recorded_at),
+           last_recorded_at = MAX(computer_agent_summaries.last_recorded_at, excluded.last_recorded_at)`,
+        agent.agent_id,
+        agent.display_name,
+        agent.command_count,
+        agent.first_at,
+        agent.last_at
+      );
+    }
+    const deletedEvents = Number(
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM computer_events WHERE created_at < ?",
+          eventCutoff
+        )
+        .one().count
+    );
+    this.ctx.storage.sql.exec("DELETE FROM computer_events WHERE created_at < ?", eventCutoff);
+    this.ctx.storage.sql.exec("DELETE FROM exec_rate_limits WHERE last_exec_at < ?", now - 60_000);
+
+    const snapshotRows = this.ctx.storage.sql
+      .exec<{
+        snapshot_id: string;
+        manifest_key: string;
+        reason: string;
+        created_at: number;
+      }>(
+        `SELECT snapshot_id, manifest_key, reason, created_at
+         FROM snapshots
+         WHERE (reason LIKE 'automatic-%' AND created_at < ?)
+            OR (reason NOT LIKE 'automatic-%' AND created_at < ?)
+         ORDER BY created_at ASC`,
+        now - AUTOMATIC_SNAPSHOT_RETENTION_MS,
+        now - MANUAL_SNAPSHOT_RETENTION_MS
+      )
+      .toArray();
+    let deletedSnapshots = 0;
+    for (const snapshot of snapshotRows) {
+      const objectRows = this.ctx.storage.sql
+        .exec<{ object_key: string }>(
+          "SELECT object_key FROM snapshot_objects WHERE snapshot_id = ?",
+          snapshot.snapshot_id
+        )
+        .toArray();
+      this.ctx.storage.sql.exec(
+        "DELETE FROM snapshot_objects WHERE snapshot_id = ?",
+        snapshot.snapshot_id
+      );
+      for (const object of objectRows) {
+        const references = Number(
+          this.ctx.storage.sql
+            .exec<{ count: number }>(
+              "SELECT COUNT(*) AS count FROM snapshot_objects WHERE object_key = ?",
+              object.object_key
+            )
+            .one().count
+        );
+        if (references === 0) await this.env.PRIVATE_DATA.delete(object.object_key);
+      }
+      await this.env.PRIVATE_DATA.delete(snapshot.manifest_key);
+      this.ctx.storage.sql.exec("DELETE FROM snapshots WHERE snapshot_id = ?", snapshot.snapshot_id);
+      deletedSnapshots += 1;
+    }
+
+    const tombstones = this.tableExists("vfs_changes")
+      ? Number(this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM vfs_changes").one().count)
+      : 0;
+    if (tombstones >= TOMBSTONE_ALERT_THRESHOLD) {
+      console.warn({
+        message: "workspace tombstone count needs maintenance",
+        roomId,
+        tombstones,
+        threshold: TOMBSTONE_ALERT_THRESHOLD
+      });
+    }
+    console.log({
+      message: "computer retention completed",
+      roomId,
+      deletedSnapshots,
+      deletedEvents,
+      tombstones
+    });
+    return { deletedSnapshots, deletedEvents, tombstones };
+  }
+
+  private tableExists(name: string): boolean {
+    return this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?",
+        name
+      )
+      .one().count > 0;
   }
 
   private appendEvent(input: {
@@ -901,23 +1150,6 @@ function mapEvent(row: ComputerEventRow): ComputerEvent {
   };
 }
 
-function mapFileHistory(row: FileHistoryRow): ComputerFileHistoryEntry {
-  return {
-    sequence: row.sequence,
-    path: row.path,
-    operation: row.operation,
-    size: row.size,
-    mtime: row.mtime,
-    filesystemRevision: row.filesystem_revision,
-    preview: row.preview,
-    createdAt: row.created_at
-  };
-}
-
-function historyObjectKey(roomId: string, revision: number, path: string): string {
-  return `computer/history/${roomId}/${revision}/${encodeURIComponent(path)}`;
-}
-
 function snapshotManifestKey(roomId: string, snapshotId: string): string {
   return `computer/snapshots/${roomId}/${snapshotId}/manifest.json`;
 }
@@ -928,6 +1160,31 @@ function snapshotFileKey(roomId: string, snapshotId: string, path: string): stri
 
 function depth(path: string): number {
   return path.split("/").filter(Boolean).length;
+}
+
+function minimumTimestamp(...values: Array<number | null | undefined>): number | null {
+  const present = values.filter((value): value is number => value !== null && value !== undefined);
+  return present.length === 0 ? null : Math.min(...present);
+}
+
+function maximumTimestamp(...values: Array<number | null | undefined>): number | null {
+  const present = values.filter((value): value is number => value !== null && value !== undefined);
+  return present.length === 0 ? null : Math.max(...present);
+}
+
+function readBooleanProperty(error: unknown, key: "overloaded" | "retryable"): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    key in error &&
+    (error as Record<string, unknown>)[key] === true
+  );
+}
+
+async function shortHash(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest.slice(0, 6), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function putKnownLength(

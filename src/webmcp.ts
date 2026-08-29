@@ -30,8 +30,7 @@ export type WebMcpStatus = "registering" | "available" | "unavailable" | "error"
 
 export function registerRoomTools(
   roomId: string,
-  onStatus: (status: WebMcpStatus) => void,
-  onMutation: () => void
+  onStatus: (status: WebMcpStatus) => void
 ): () => void {
   const modelContext = document.modelContext;
   if (!modelContext) {
@@ -75,9 +74,7 @@ export function registerRoomTools(
           additionalProperties: false
         },
         async execute(arguments_) {
-          const observation = await submitVote(roomId, String(arguments_.input) as GameInput);
-          onMutation();
-          return toolResult(observation);
+          return toolResult(await submitVote(roomId, String(arguments_.input) as GameInput));
         }
       },
       { signal: controller.signal }
@@ -125,9 +122,7 @@ export function registerRoomTools(
           additionalProperties: false
         },
         async execute(arguments_) {
-          const message = await sendChat(roomId, String(arguments_.message));
-          onMutation();
-          return toolResult(message);
+          return toolResult(await sendChat(roomId, String(arguments_.message)));
         }
       },
       { signal: controller.signal }
@@ -156,13 +151,13 @@ export function registerRoomTools(
           additionalProperties: false
         },
         async execute(arguments_) {
-          const result = await execComputer(
-            roomId,
-            String(arguments_.command),
-            typeof arguments_.cwd === "string" ? arguments_.cwd : "/workspace"
+          return toolResult(
+            await execComputer(
+              roomId,
+              String(arguments_.command),
+              typeof arguments_.cwd === "string" ? arguments_.cwd : "/workspace"
+            )
           );
-          onMutation();
-          return toolResult(result);
         }
       },
       { signal: controller.signal }

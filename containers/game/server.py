@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import hashlib
 import io
 import json
@@ -26,8 +27,18 @@ VALID_INPUTS = {"up", "down", "left", "right", "a", "b", "start", "select"}
 ROM_PATH = Path("/app/current.gb")
 FRAME_RATE = 60
 FRAME_INTERVAL_SECONDS = 1 / FRAME_RATE
-STREAM_FRAME_RATE = 30
-PARTY_SAMPLE_INTERVAL_SECONDS = 0.25
+STREAM_FRAME_RATE = 15
+PARTY_SAMPLE_INTERVAL_SECONDS = 1.0
+SEND_TIMEOUT_SECONDS = 1.0
+METRIC_SAMPLE_COUNT = 512
+
+
+def percentile(values: deque[float], requested: int) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((requested / 100) * (len(ordered) - 1))))
+    return round(ordered[index], 3)
 
 
 class BinarySocket(Protocol):
@@ -48,6 +59,7 @@ class Emulator:
         self.rom_sha256: str | None = None
         self.last_party_snapshot: dict[str, Any] | None = None
         self.pending_release: tuple[str, int] | None = None
+        self.tick_drift_ms: deque[float] = deque(maxlen=METRIC_SAMPLE_COUNT)
         self.stopped = threading.Event()
         self.runner = threading.Thread(
             target=self._run_realtime,
@@ -129,12 +141,13 @@ class Emulator:
             self.last_party_snapshot = snapshot
             return snapshot
 
-    def status(self) -> dict[str, str | bool | int | None]:
+    def status(self) -> dict[str, str | bool | int | float | None]:
         with self.lock:
             return {
                 "loaded": self.pyboy is not None,
                 "romSha256": self.rom_sha256,
                 "frameCount": self.pyboy.frame_count if self.pyboy is not None else None,
+                "tickDriftP95Ms": percentile(self.tick_drift_ms, 95),
             }
 
     def shutdown(self) -> None:
@@ -162,6 +175,7 @@ class Emulator:
                 break
 
             try:
+                self.tick_drift_ms.append(max(0.0, (time.monotonic() - next_frame_at) * 1000))
                 with self.frame_condition:
                     if self.pyboy is not pyboy:
                         next_frame_at = time.monotonic()
@@ -201,16 +215,22 @@ class FrameBroadcaster:
         emulator: Emulator,
         frame_rate: int = STREAM_FRAME_RATE,
         party_sample_interval_seconds: float = PARTY_SAMPLE_INTERVAL_SECONDS,
+        send_timeout_seconds: float = SEND_TIMEOUT_SECONDS,
     ) -> None:
         self.emulator = emulator
         self.frame_interval_seconds = 1 / frame_rate
         self.party_sample_interval_seconds = party_sample_interval_seconds
+        self.send_timeout_seconds = send_timeout_seconds
         self.clients: set[BinarySocket] = set()
         self.client_available = asyncio.Event()
         self.send_tasks: dict[BinarySocket, tuple[asyncio.Task[None], str | None]] = {}
         self.sent_party_messages: dict[BinarySocket, str | None] = {}
         self.latest_party_message: str | None = None
         self.next_party_sample_at = 0.0
+        self.frame_encode_ms: deque[float] = deque(maxlen=METRIC_SAMPLE_COUNT)
+        self.frames_encoded = 0
+        self.frames_dropped_for_slow_clients = 0
+        self.last_metrics_log_at = 0.0
         self.producer: asyncio.Task[None] | None = None
 
     def add(self, socket: BinarySocket) -> None:
@@ -267,9 +287,12 @@ class FrameBroadcaster:
             elif client not in self.send_tasks:
                 ready.append(client)
 
+        self.frames_dropped_for_slow_clients += len(self.clients) - len(ready)
+
         if not ready or not self.emulator.status()["loaded"]:
             return False
 
+        encode_started_at = asyncio.get_running_loop().time()
         try:
             frame = await asyncio.to_thread(self.emulator.frame)
         except RuntimeError:
@@ -280,6 +303,10 @@ class FrameBroadcaster:
                 flush=True,
             )
             return False
+        self.frame_encode_ms.append(
+            (asyncio.get_running_loop().time() - encode_started_at) * 1000
+        )
+        self.frames_encoded += 1
 
         now = asyncio.get_running_loop().time()
         if self.latest_party_message is None or now >= self.next_party_sample_at:
@@ -321,6 +348,17 @@ class FrameBroadcaster:
         frame: bytes,
         party_message: str | None,
     ) -> None:
+        await asyncio.wait_for(
+            self._send_without_timeout(socket, frame, party_message),
+            timeout=self.send_timeout_seconds,
+        )
+
+    async def _send_without_timeout(
+        self,
+        socket: BinarySocket,
+        frame: bytes,
+        party_message: str | None,
+    ) -> None:
         if party_message is not None:
             await socket.send_str(party_message)
         await socket.send_bytes(frame)
@@ -339,9 +377,26 @@ class FrameBroadcaster:
             if wait_seconds > 0:
                 await asyncio.sleep(wait_seconds)
             await self.broadcast_once()
+            now = asyncio.get_running_loop().time()
+            if now - self.last_metrics_log_at >= 60:
+                self.last_metrics_log_at = now
+                print(
+                    json.dumps({"message": "game stream metrics", **self.metrics()}),
+                    flush=True,
+                )
             next_frame_at += self.frame_interval_seconds
             if next_frame_at < asyncio.get_running_loop().time() - self.frame_interval_seconds:
                 next_frame_at = asyncio.get_running_loop().time()
+
+    def metrics(self) -> dict[str, int | float | None]:
+        return {
+            "streamClients": len(self.clients),
+            "framesEncoded": self.frames_encoded,
+            "framesDroppedForSlowClients": self.frames_dropped_for_slow_clients,
+            "pngEncodeP50Ms": percentile(self.frame_encode_ms, 50),
+            "pngEncodeP95Ms": percentile(self.frame_encode_ms, 95),
+            "targetStreamFps": STREAM_FRAME_RATE,
+        }
 
     def _finish_send(
         self,
@@ -428,7 +483,7 @@ def create_app() -> Any:
         response.headers["cache-control"] = "no-store"
 
     async def health(_request: Any) -> Any:
-        return json_response({"ok": True, **EMULATOR.status()})
+        return json_response({"ok": True, **EMULATOR.status(), **broadcaster.metrics()})
 
     async def status(_request: Any) -> Any:
         return json_response(EMULATOR.status())

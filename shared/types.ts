@@ -117,11 +117,25 @@ export interface GameObservation {
   frameRevision: number;
   frameUrl: string;
   activeAgents: number;
-  voteWindow: VoteWindow;
+  voteWindow: VoteWindow | null;
   votes: VoteTally[];
   yourVote: GameInput | null;
   lastInput: GameInput | null;
   events: GameEvent[];
+}
+
+export interface VoteReceipt {
+  accepted: true;
+  windowId: number;
+  input: GameInput;
+  endsAt: number;
+  unchanged: boolean;
+}
+
+export interface VoteTallyUpdate {
+  windowId: number;
+  votes: VoteTally[];
+  activeAgents: number;
 }
 
 export type PokemonStatus = "OK" | "SLP" | "PSN" | "BRN" | "FRZ" | "PAR" | "FNT";
@@ -191,17 +205,6 @@ export interface ComputerFileView {
   truncated: boolean;
 }
 
-export interface ComputerFileHistoryEntry {
-  sequence: number;
-  path: string;
-  operation: "created" | "updated" | "deleted";
-  size: number;
-  mtime: number;
-  filesystemRevision: number;
-  preview: string | null;
-  createdAt: number;
-}
-
 export interface ComputerOverview {
   roomId: string;
   filesystemRevision: number;
@@ -221,7 +224,23 @@ export interface ComputerSnapshot {
   filesystemRevision: number;
   fileCount: number;
   totalBytes: number;
+  uploadedFileCount: number;
+  uploadedBytes: number;
   createdAt: number;
+}
+
+export interface ComputerRuntimeProbe {
+  ok: true;
+  workspaceAcquireMs: number;
+  containerConnectMs: number;
+  commandMs: number;
+  totalMs: number;
+}
+
+export interface ComputerReleaseStatus {
+  queueDepth: number;
+  snapshotRunning: boolean;
+  circuitOpenUntil: number | null;
 }
 
 export interface SocketEnvelope<T = unknown> {

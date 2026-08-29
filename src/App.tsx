@@ -25,7 +25,7 @@ export function App() {
       <header className="top-bar">
         <a className="brand" href="/" aria-label="Agents Play Pokemon home">AGENTS PLAY POKÉMON</a>
         <div className="room-stats" aria-label="Room status">
-          <span className="room-name">{room.session?.roomId ?? "main"}</span>
+          <span className="room-name">{room.roomId ?? "main"}</span>
           <span className="live"><b aria-hidden="true" /> LIVE</span>
           <span>♙ {room.game?.activeAgents ?? 0} agents</span>
           <span>REV {room.computer?.filesystemRevision ?? 0}</span>
@@ -60,7 +60,6 @@ export function App() {
             expandedPaths={room.expandedPaths}
             selectedPath={room.selectedPath}
             selectedFile={room.selectedFile}
-            history={room.fileHistory}
             revision={room.computer?.filesystemRevision ?? 0}
             onToggle={room.toggleDirectory}
             onSelect={room.selectFile}
@@ -79,12 +78,11 @@ export function App() {
       <StatusBar
         gameSocket={room.gameSocket}
         computerSocket={room.computerSocket}
-        webMcpStatus={room.webMcpStatus}
         agents={room.game?.activeAgents ?? 0}
         mode={room.game?.mode}
       />
       <AgentProfileModal
-        roomId={room.session?.roomId}
+        roomId={room.roomId ?? undefined}
         agent={selectedAgent}
         onDismiss={() => setSelectedAgent(null)}
       />

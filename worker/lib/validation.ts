@@ -6,11 +6,13 @@ const WORKSPACE_ROOT = "/workspace";
 
 export class InputError extends Error {
   readonly status: number;
+  readonly retryAfterSeconds: number | null;
 
-  constructor(message: string, status = 400) {
+  constructor(message: string, status = 400, retryAfterSeconds: number | null = null) {
     super(message);
     this.name = "InputError";
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 

@@ -1,8 +1,4 @@
-import type {
-  ComputerFileHistoryEntry,
-  ComputerFileView,
-  ComputerTreeEntry
-} from "../../shared/types";
+import type { ComputerFileView, ComputerTreeEntry } from "../../shared/types";
 import { FileTree } from "./FileTree";
 
 interface ComputerPanelProps {
@@ -10,7 +6,6 @@ interface ComputerPanelProps {
   expandedPaths: Set<string>;
   selectedPath: string;
   selectedFile: ComputerFileView | null;
-  history: ComputerFileHistoryEntry[];
   revision: number;
   onToggle(path: string): void;
   onSelect(path: string): void;
@@ -21,7 +16,6 @@ export function ComputerPanel({
   expandedPaths,
   selectedPath,
   selectedFile,
-  history,
   revision,
   onToggle,
   onSelect
@@ -62,7 +56,7 @@ export function ComputerPanel({
           </div>
           <div className="file-meta">
             <span>{selectedFile?.encoding ?? "utf8"}</span>
-            <span>{history.length} recorded change{history.length === 1 ? "" : "s"}</span>
+            <span>updates on filesystem revision</span>
           </div>
         </div>
       </div>

@@ -3,34 +3,31 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ChatMessage,
   ComputerEvent,
-  ComputerFileHistoryEntry,
   ComputerFileView,
   ComputerOverview,
   ComputerTreeEntry,
   GameObservation,
-  SocketEnvelope
+  SocketEnvelope,
+  VoteTallyUpdate
 } from "../shared/types";
 import {
   ApiError,
-  observeGame,
-  readChat,
-  readChatHistory,
-  readComputer,
-  readComputerEventHistory,
-  readFile,
-  readHistory,
-  readTree,
-  sessionSocketProtocols,
-  socketUrl
+  observePublicGame,
+  publicSocketUrl,
+  readPublicChat,
+  readPublicChatHistory,
+  readPublicComputer,
+  readPublicComputerEventHistory,
+  readPublicFile,
+  readPublicRoom,
+  readPublicTree
 } from "./api";
-import { useSession } from "./hooks/useSession";
 import { mergeBySequence } from "./lib/sequence";
-import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
 type ConnectionState = "connecting" | "open" | "closed";
 
 export function useRoomData() {
-  const { session, sessionError, sessionLoading, dismissSessionError } = useSession();
+  const [roomId, setRoomId] = useState<string | null>(null);
   const [game, setGame] = useState<GameObservation | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [chatHasMore, setChatHasMore] = useState(false);
@@ -45,354 +42,259 @@ export function useRoomData() {
   );
   const [selectedPath, setSelectedPath] = useState("/workspace/current_goal.md");
   const [selectedFile, setSelectedFile] = useState<ComputerFileView | null>(null);
-  const [fileHistory, setFileHistory] = useState<ComputerFileHistoryEntry[]>([]);
   const [gameSocket, setGameSocket] = useState<ConnectionState>("connecting");
   const [computerSocket, setComputerSocket] = useState<ConnectionState>("connecting");
-  const [webMcpStatus, setWebMcpStatus] = useState<WebMcpStatus>("registering");
   const [error, setError] = useState<string | null>(null);
   const chatNewestCursor = useRef(0);
   const chatNextBefore = useRef<number | null>(null);
-  const chatReady = useRef(false);
-  const chatInitialRequest = useRef<Promise<void> | null>(null);
-  const chatOlderRequest = useRef(false);
   const computerNewestCursor = useRef(0);
   const computerNextBefore = useRef<number | null>(null);
-  const computerReady = useRef(false);
-  const computerInitialRequest = useRef<Promise<void> | null>(null);
-  const computerOlderRequest = useRef(false);
-  const gameRequest = useRef<Promise<void> | null>(null);
-  const chatRefreshRequest = useRef<Promise<void> | null>(null);
-  const computerRefreshRequest = useRef<Promise<void> | null>(null);
-  const treeRequests = useRef(new Map<string, Promise<void>>());
   const selectedPathRef = useRef(selectedPath);
-  const selectedFileRequest = useRef<{ path: string; request: Promise<void> } | null>(null);
+  const expandedPathsRef = useRef(expandedPaths);
+  const previousRevision = useRef<number | null>(null);
+  const requests = useRef(new Set<string>());
   selectedPathRef.current = selectedPath;
+  expandedPathsRef.current = expandedPaths;
 
-  const refreshGame = useCallback((): Promise<void> => {
-    if (!session) return Promise.resolve();
-    if (gameRequest.current) return gameRequest.current;
-    const request = (async () => {
+  useEffect(() => {
+    let active = true;
+    void readPublicRoom()
+      .then((room) => {
+        if (active) setRoomId(room.roomId);
+      })
+      .catch((cause: unknown) => {
+        if (active) setError(messageOf(cause));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const refreshGame = useCallback(async (): Promise<void> => {
+    if (!roomId || !beginRequest(requests.current, "game")) return;
+    try {
+      setGame(await observePublicGame(roomId));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      requests.current.delete("game");
+    }
+  }, [roomId]);
+
+  const refreshChat = useCallback(async (): Promise<void> => {
+    if (!roomId || !beginRequest(requests.current, "chat")) return;
+    try {
+      const response = await readPublicChat(roomId, chatNewestCursor.current);
+      chatNewestCursor.current = Math.max(chatNewestCursor.current, response.cursor);
+      setChat((current) => mergeBySequence(current, response.messages));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      requests.current.delete("chat");
+    }
+  }, [roomId]);
+
+  const refreshComputer = useCallback(async (): Promise<void> => {
+    if (!roomId || !beginRequest(requests.current, "computer")) return;
+    try {
+      const response = await readPublicComputer(roomId, computerNewestCursor.current);
+      computerNewestCursor.current = Math.max(
+        computerNewestCursor.current,
+        response.events.at(-1)?.sequence ?? 0
+      );
+      setComputer(response);
+      setComputerEvents((current) => mergeBySequence(current, response.events));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      requests.current.delete("computer");
+    }
+  }, [roomId]);
+
+  const loadTree = useCallback(
+    async (path: string): Promise<void> => {
+      const requestKey = `tree:${path}`;
+      if (!roomId || !beginRequest(requests.current, requestKey)) return;
       try {
-        setGame(await observeGame(session.roomId));
+        const response = await readPublicTree(roomId, path);
+        setTreeByPath((current) => ({ ...current, [path]: response.entries }));
       } catch (cause) {
-        reportNonAuthError(cause, setError);
+        setError(messageOf(cause));
       } finally {
-        gameRequest.current = null;
+        requests.current.delete(requestKey);
       }
-    })();
-    gameRequest.current = request;
-    return request;
-  }, [session]);
+    },
+    [roomId]
+  );
 
-  const loadInitialChat = useCallback((): Promise<void> => {
-    if (!session || chatReady.current) return Promise.resolve();
-    if (chatInitialRequest.current) return chatInitialRequest.current;
-    const request = (async () => {
-      try {
-        const response = await readChatHistory(session.roomId);
-        chatNextBefore.current = response.nextBefore;
-        chatNewestCursor.current = Math.max(
-          chatNewestCursor.current,
-          response.messages.at(-1)?.sequence ?? 0
-        );
-        setChatHasMore(response.hasMore);
-        setChat((current) => mergeBySequence(current, response.messages));
-        chatReady.current = true;
-      } catch (cause) {
-        reportNonAuthError(cause, setError);
-      } finally {
-        chatInitialRequest.current = null;
-      }
-    })();
-    chatInitialRequest.current = request;
-    return request;
-  }, [session]);
-
-  const loadInitialComputerEvents = useCallback((): Promise<void> => {
-    if (!session || computerReady.current) return Promise.resolve();
-    if (computerInitialRequest.current) return computerInitialRequest.current;
-    const request = (async () => {
-      try {
-        const response = await readComputerEventHistory(session.roomId);
-        computerNextBefore.current = response.nextBefore;
-        computerNewestCursor.current = Math.max(
-          computerNewestCursor.current,
-          response.events.at(-1)?.sequence ?? 0
-        );
-        setComputerEventsHaveMore(response.hasMore);
-        setComputerEvents((current) => mergeBySequence(current, response.events));
-        setComputer({
-          roomId: response.roomId,
-          filesystemRevision: response.filesystemRevision,
-          events: response.events
-        });
-        computerReady.current = true;
-      } catch (cause) {
-        reportNonAuthError(cause, setError);
-      } finally {
-        computerInitialRequest.current = null;
-      }
-    })();
-    computerInitialRequest.current = request;
-    return request;
-  }, [session]);
-
-  const refreshChat = useCallback((): Promise<void> => {
-    if (!session) return Promise.resolve();
-    if (chatRefreshRequest.current) return chatRefreshRequest.current;
-    const request = (async () => {
-      if (!chatReady.current) {
-        await loadInitialChat();
-        return;
-      }
-      try {
-        const response = await readChat(session.roomId, chatNewestCursor.current);
-        chatNewestCursor.current = Math.max(chatNewestCursor.current, response.cursor);
-        setChat((current) => mergeBySequence(current, response.messages));
-      } catch (cause) {
-        reportNonAuthError(cause, setError);
-      }
-    })().finally(() => {
-      chatRefreshRequest.current = null;
-    });
-    chatRefreshRequest.current = request;
-    return request;
-  }, [loadInitialChat, session]);
-
-  const refreshComputer = useCallback((): Promise<void> => {
-    if (!session) return Promise.resolve();
-    if (computerRefreshRequest.current) return computerRefreshRequest.current;
-    const request = (async () => {
-      if (!computerReady.current) {
-        await loadInitialComputerEvents();
-        return;
-      }
-      try {
-        const response = await readComputer(session.roomId, computerNewestCursor.current);
-        setComputer(response);
-        computerNewestCursor.current = Math.max(
-          computerNewestCursor.current,
-          response.events.at(-1)?.sequence ?? 0
-        );
-        setComputerEvents((current) => mergeBySequence(current, response.events));
-      } catch (cause) {
-        reportNonAuthError(cause, setError);
-      }
-    })().finally(() => {
-      computerRefreshRequest.current = null;
-    });
-    computerRefreshRequest.current = request;
-    return request;
-  }, [loadInitialComputerEvents, session]);
+  const loadSelectedFile = useCallback(async (): Promise<void> => {
+    const requestedPath = selectedPath;
+    const requestKey = `file:${requestedPath}`;
+    if (!roomId || !requestedPath || !beginRequest(requests.current, requestKey)) return;
+    try {
+      const file = await readPublicFile(roomId, requestedPath);
+      if (selectedPathRef.current === requestedPath) setSelectedFile(file);
+    } catch (cause) {
+      if (selectedPathRef.current !== requestedPath) return;
+      setSelectedFile(null);
+      if (!(cause instanceof ApiError && cause.status === 404)) setError(messageOf(cause));
+    } finally {
+      requests.current.delete(requestKey);
+    }
+  }, [roomId, selectedPath]);
 
   const loadOlderChat = useCallback(async (): Promise<void> => {
-    if (!session || chatOlderRequest.current || chatNextBefore.current === null) return;
-    chatOlderRequest.current = true;
+    if (!roomId || chatLoadingOlder || chatNextBefore.current === null) return;
     setChatLoadingOlder(true);
     try {
-      const response = await readChatHistory(session.roomId, chatNextBefore.current);
+      const response = await readPublicChatHistory(roomId, chatNextBefore.current);
       chatNextBefore.current = response.nextBefore;
       setChatHasMore(response.hasMore);
       setChat((current) => mergeBySequence(current, response.messages));
     } catch (cause) {
-      reportNonAuthError(cause, setError);
+      setError(messageOf(cause));
     } finally {
-      chatOlderRequest.current = false;
       setChatLoadingOlder(false);
     }
-  }, [session]);
+  }, [chatLoadingOlder, roomId]);
 
   const loadOlderComputerEvents = useCallback(async (): Promise<void> => {
-    if (!session || computerOlderRequest.current || computerNextBefore.current === null) return;
-    computerOlderRequest.current = true;
+    if (!roomId || computerEventsLoadingOlder || computerNextBefore.current === null) return;
     setComputerEventsLoadingOlder(true);
     try {
-      const response = await readComputerEventHistory(
-        session.roomId,
+      const response = await readPublicComputerEventHistory(
+        roomId,
         computerNextBefore.current
       );
       computerNextBefore.current = response.nextBefore;
       setComputerEventsHaveMore(response.hasMore);
       setComputerEvents((current) => mergeBySequence(current, response.events));
-      setComputer((current) =>
-        current
-          ? { ...current, filesystemRevision: response.filesystemRevision }
-          : {
-              roomId: response.roomId,
-              filesystemRevision: response.filesystemRevision,
-              events: []
-            }
-      );
     } catch (cause) {
-      reportNonAuthError(cause, setError);
+      setError(messageOf(cause));
     } finally {
-      computerOlderRequest.current = false;
       setComputerEventsLoadingOlder(false);
     }
-  }, [session]);
-
-  const loadTree = useCallback(
-    (path: string): Promise<void> => {
-      if (!session) return Promise.resolve();
-      const current = treeRequests.current.get(path);
-      if (current) return current;
-      const request = (async () => {
-        try {
-          const response = await readTree(session.roomId, path);
-          setTreeByPath((value) => ({ ...value, [path]: response.entries }));
-        } catch (cause) {
-          reportNonAuthError(cause, setError);
-        } finally {
-          treeRequests.current.delete(path);
-        }
-      })();
-      treeRequests.current.set(path, request);
-      return request;
-    },
-    [session]
-  );
-
-  const loadSelectedFile = useCallback((): Promise<void> => {
-    if (!session || !selectedPath) return Promise.resolve();
-    if (selectedFileRequest.current?.path === selectedPath) {
-      return selectedFileRequest.current.request;
-    }
-    const requestedPath = selectedPath;
-    const request = (async () => {
-      try {
-        const [file, history] = await Promise.all([
-          readFile(session.roomId, requestedPath),
-          readHistory(session.roomId, requestedPath)
-        ]);
-        if (requestedPath !== selectedPathRef.current) return;
-        setSelectedFile(file);
-        setFileHistory(history.history);
-      } catch (cause) {
-        if (requestedPath !== selectedPathRef.current) return;
-        setSelectedFile(null);
-        setFileHistory([]);
-        if (!(cause instanceof ApiError && cause.status === 404)) {
-          reportNonAuthError(cause, setError);
-        }
-      } finally {
-        if (selectedFileRequest.current?.path === requestedPath) {
-          selectedFileRequest.current = null;
-        }
-      }
-    })();
-    selectedFileRequest.current = { path: requestedPath, request };
-    return request;
-  }, [selectedPath, session]);
-
-  const refreshAll = useCallback(() => {
-    void refreshGame();
-    void refreshChat();
-    void refreshComputer();
-    void loadTree("/workspace");
-    void loadSelectedFile();
-  }, [loadSelectedFile, loadTree, refreshChat, refreshComputer, refreshGame]);
+  }, [computerEventsLoadingOlder, roomId]);
 
   useEffect(() => {
-    if (!session) return;
-    chatNewestCursor.current = 0;
-    chatNextBefore.current = null;
-    chatReady.current = false;
-    computerNewestCursor.current = 0;
-    computerNextBefore.current = null;
-    computerReady.current = false;
-    setChat([]);
-    setChatHasMore(false);
-    setComputerEvents([]);
-    setComputerEventsHaveMore(false);
+    if (!roomId) return;
+    let active = true;
     void Promise.all([
-      refreshGame(),
-      loadInitialChat(),
-      loadInitialComputerEvents(),
-      loadTree("/workspace"),
-      loadSelectedFile()
-    ]);
-  }, [
-    loadInitialChat,
-    loadInitialComputerEvents,
-    loadSelectedFile,
-    loadTree,
-    refreshGame,
-    session
-  ]);
-
-  useEffect(() => {
-    if (!session) return;
-    const gameTimer = window.setInterval(() => void refreshGame(), 2_000);
-    const chatTimer = window.setInterval(() => void refreshChat(), 2_500);
-    const computerTimer = window.setInterval(() => void refreshComputer(), 3_000);
-    const treeTimer = window.setInterval(() => {
-      void loadTree("/workspace");
-      void loadSelectedFile();
-    }, 4_000);
-    return () => {
-      window.clearInterval(gameTimer);
-      window.clearInterval(chatTimer);
-      window.clearInterval(computerTimer);
-      window.clearInterval(treeTimer);
-    };
-  }, [loadSelectedFile, loadTree, refreshChat, refreshComputer, refreshGame, session]);
-
-  useEffect(() => {
-    if (!session) return;
-    return connectRoomSocket(
-      socketUrl(session.roomId, "game"),
-      setGameSocket,
-      () => {
-        void refreshGame();
-        void refreshChat();
-      }
-    );
-  }, [refreshChat, refreshGame, session]);
-
-  useEffect(() => {
-    if (!session) return;
-    return connectRoomSocket(
-      socketUrl(session.roomId, "computer"),
-      setComputerSocket,
-      (envelope) => {
-        if (envelope.source !== "computer") return;
-        const event = envelope.payload as ComputerEvent;
-        if (typeof event?.sequence !== "number") return;
-        computerNewestCursor.current = Math.max(computerNewestCursor.current, event.sequence);
-        setComputerEvents((current) => mergeBySequence(current, [event]));
-        setComputer((current) =>
-          current ? { ...current, filesystemRevision: event.filesystemRevision } : current
-        );
-      }
-    );
-  }, [session]);
-
-  useEffect(() => {
-    if (!session) return;
-    return registerRoomTools(session.roomId, setWebMcpStatus, refreshAll);
-  }, [refreshAll, session]);
-
-  const toggleDirectory = useCallback(
-    (path: string) => {
-      setExpandedPaths((current) => {
-        const next = new Set(current);
-        if (next.has(path)) next.delete(path);
-        else next.add(path);
-        return next;
+      observePublicGame(roomId),
+      readPublicChatHistory(roomId),
+      readPublicComputerEventHistory(roomId),
+      readPublicTree(roomId, "/workspace"),
+      readPublicFile(roomId, selectedPath).catch((cause: unknown) => {
+        if (cause instanceof ApiError && cause.status === 404) return null;
+        throw cause;
+      })
+    ])
+      .then(([nextGame, nextChat, nextComputer, nextTree, nextFile]) => {
+        if (!active) return;
+        setGame(nextGame);
+        chatNextBefore.current = nextChat.nextBefore;
+        chatNewestCursor.current = nextChat.messages.at(-1)?.sequence ?? 0;
+        setChat(nextChat.messages);
+        setChatHasMore(nextChat.hasMore);
+        computerNextBefore.current = nextComputer.nextBefore;
+        computerNewestCursor.current = nextComputer.events.at(-1)?.sequence ?? 0;
+        setComputer({
+          roomId: nextComputer.roomId,
+          filesystemRevision: nextComputer.filesystemRevision,
+          events: nextComputer.events
+        });
+        setComputerEvents(nextComputer.events);
+        setComputerEventsHaveMore(nextComputer.hasMore);
+        setTreeByPath({ "/workspace": nextTree.entries });
+        setSelectedFile(nextFile);
+      })
+      .catch((cause: unknown) => {
+        if (active) setError(messageOf(cause));
       });
-      if (!treeByPath[path]) void loadTree(path);
-    },
-    [loadTree, treeByPath]
-  );
+    return () => {
+      active = false;
+    };
+  }, [roomId]);
 
-  const selectFile = useCallback((path: string) => setSelectedPath(path), []);
+  useEffect(() => {
+    if (!roomId) return;
+    const delay = gameSocket === "open" && computerSocket === "open" ? 30_000 : 2_500;
+    const timer = window.setInterval(() => {
+      void refreshGame();
+      void refreshChat();
+      void refreshComputer();
+    }, delay);
+    return () => window.clearInterval(timer);
+  }, [computerSocket, gameSocket, refreshChat, refreshComputer, refreshGame, roomId]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    return connectRoomSocket(publicSocketUrl(roomId, "game"), setGameSocket, (envelope) => {
+      if (envelope.source !== "game") return;
+      if (envelope.type === "game.state") {
+        setGame(envelope.payload as GameObservation);
+        return;
+      }
+      if (envelope.type === "vote.tally") {
+        const update = envelope.payload as VoteTallyUpdate;
+        setGame((current) => current && current.voteWindow?.id === update.windowId
+          ? { ...current, votes: update.votes, activeAgents: update.activeAgents }
+          : current);
+        return;
+      }
+      if (envelope.type === "chat.sent") {
+        const message = envelope.payload as ChatMessage;
+        if (typeof message.sequence !== "number") return;
+        chatNewestCursor.current = Math.max(chatNewestCursor.current, message.sequence);
+        setChat((current) => mergeBySequence(current, [message]));
+      }
+    });
+  }, [roomId]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    return connectRoomSocket(publicSocketUrl(roomId, "computer"), setComputerSocket, (envelope) => {
+      if (envelope.source !== "computer") return;
+      const event = envelope.payload as ComputerEvent;
+      if (typeof event.sequence !== "number") return;
+      computerNewestCursor.current = Math.max(computerNewestCursor.current, event.sequence);
+      setComputerEvents((current) => mergeBySequence(current, [event]));
+      setComputer((current) => current
+        ? { ...current, filesystemRevision: event.filesystemRevision, events: [event] }
+        : current);
+    });
+  }, [roomId]);
+
+  useEffect(() => {
+    const revision = computer?.filesystemRevision;
+    if (revision === undefined) return;
+    if (previousRevision.current === null) {
+      previousRevision.current = revision;
+      return;
+    }
+    if (revision === previousRevision.current) return;
+    previousRevision.current = revision;
+    if (document.visibilityState !== "visible") return;
+    for (const path of expandedPathsRef.current) void loadTree(path);
+    void loadSelectedFile();
+  }, [computer?.filesystemRevision, loadSelectedFile, loadTree]);
 
   useEffect(() => {
     void loadSelectedFile();
   }, [loadSelectedFile]);
 
+  const toggleDirectory = useCallback((path: string) => {
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    if (!treeByPath[path]) void loadTree(path);
+  }, [loadTree, treeByPath]);
+
   return {
-    session,
+    roomId,
     game,
     chat,
     chatHasMore,
@@ -405,21 +307,22 @@ export function useRoomData() {
     expandedPaths,
     selectedPath,
     selectedFile,
-    fileHistory,
     gameSocket,
     computerSocket,
-    webMcpStatus,
-    error: sessionError ?? error,
-    loading: sessionLoading || game === null,
+    error,
+    loading: roomId === null || game === null,
     loadOlderChat,
     loadOlderComputerEvents,
     toggleDirectory,
-    selectFile,
-    dismissError: () => {
-      dismissSessionError();
-      setError(null);
-    }
+    selectFile: setSelectedPath,
+    dismissError: () => setError(null)
   };
+}
+
+function beginRequest(active: Set<string>, key: string): boolean {
+  if (active.has(key)) return false;
+  active.add(key);
+  return true;
 }
 
 function connectRoomSocket(
@@ -435,7 +338,7 @@ function connectRoomSocket(
   const connect = () => {
     if (stopped) return;
     setState("connecting");
-    socket = new WebSocket(url, sessionSocketProtocols());
+    socket = new WebSocket(url);
     socket.addEventListener("open", () => {
       attempt = 0;
       setState("open");
@@ -444,7 +347,7 @@ function connectRoomSocket(
       try {
         onEnvelope(JSON.parse(String(event.data)) as SocketEnvelope);
       } catch {
-        // Ignore a malformed frame. The polling path still repairs the view.
+        // The reconciliation request repairs a malformed or missed event.
       }
     });
     socket.addEventListener("close", () => {
@@ -462,14 +365,6 @@ function connectRoomSocket(
     if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     socket?.close(1000, "page closed");
   };
-}
-
-function reportNonAuthError(cause: unknown, setError: (message: string) => void): void {
-  if (cause instanceof ApiError && cause.status === 401) {
-    window.location.reload();
-    return;
-  }
-  setError(messageOf(cause));
 }
 
 function messageOf(cause: unknown): string {
