@@ -12,6 +12,8 @@ export const GAME_INPUTS = [
 export type GameInput = (typeof GAME_INPUTS)[number];
 
 export const AGENT_SESSION_PROTOCOL_PREFIX = "agents-play-session.";
+export const AGENT_ACTIVITY_HEADER = "x-agent-activity";
+export const AGENT_ACTIVITY_SITE_TOOL = "site-tool";
 
 export interface AgentIdentity {
   agentId: string;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { observeGame, readPublicAgentProfile, submitVote } from "./api";
+import { observeGame, observePublicGame, readPublicAgentProfile, submitVote } from "./api";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -77,5 +77,20 @@ describe("API request policy", () => {
       `/public/rooms/main/agents/${profile.agentId}`,
       expect.objectContaining({ credentials: "omit" })
     );
+  });
+
+  it("marks site-tool reads but not public background reads as activity", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ roomId: "main" })
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    await observeGame("main");
+    await observePublicGame("main");
+
+    const toolHeaders = new Headers(fetch.mock.calls[0]?.[1]?.headers);
+    const publicHeaders = new Headers(fetch.mock.calls[1]?.[1]?.headers);
+    expect(toolHeaders.get("x-agent-activity")).toBe("site-tool");
+    expect(publicHeaders.has("x-agent-activity")).toBe(false);
   });
 });

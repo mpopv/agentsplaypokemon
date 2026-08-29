@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   enforceSameOrigin,
   InputError,
+  isSiteToolActivity,
   parseAgentId,
   parseChatMessage,
   parseCommand,
@@ -65,6 +66,22 @@ describe("request validation", () => {
     expect(() => enforceSameOrigin(request)).toThrowError(
       expect.objectContaining({ status: 403 })
     );
+  });
+
+  it("accepts only the exact site-tool activity marker", () => {
+    expect(
+      isSiteToolActivity(new Request("https://agentsplaypokemon.com/rooms/main/game", {
+        headers: { "x-agent-activity": "site-tool" }
+      }))
+    ).toBe(true);
+    expect(
+      isSiteToolActivity(new Request("https://agentsplaypokemon.com/rooms/main/game"))
+    ).toBe(false);
+    expect(
+      isSiteToolActivity(new Request("https://agentsplaypokemon.com/rooms/main/game", {
+        headers: { "x-agent-activity": "background" }
+      }))
+    ).toBe(false);
   });
 
   it("reads only bounded JSON objects", async () => {

@@ -1,4 +1,6 @@
 import {
+  AGENT_ACTIVITY_HEADER,
+  AGENT_ACTIVITY_SITE_TOOL,
   AGENT_SESSION_PROTOCOL_PREFIX,
   type AgentProfile,
   type ChatHistoryPage,
@@ -49,7 +51,7 @@ export async function observePublicGame(roomId: string): Promise<GameObservation
 }
 
 export async function observeGame(roomId: string): Promise<GameObservation> {
-  return api(`/rooms/${encodeURIComponent(roomId)}/game`);
+  return siteToolApi(`/rooms/${encodeURIComponent(roomId)}/game`);
 }
 
 export function readPublicGameFrame(frameUrl: string): Promise<Blob> {
@@ -61,7 +63,7 @@ export function readGameFrame(frameUrl: string): Promise<Blob> {
 }
 
 export async function submitVote(roomId: string, input: GameInput): Promise<VoteReceipt> {
-  return api(`/rooms/${encodeURIComponent(roomId)}/votes`, {
+  return siteToolApi(`/rooms/${encodeURIComponent(roomId)}/votes`, {
     method: "POST",
     body: JSON.stringify({ input })
   });
@@ -78,7 +80,7 @@ export async function readChat(
   roomId: string,
   after = 0
 ): Promise<{ messages: ChatMessage[]; cursor: number }> {
-  return api(`/rooms/${encodeURIComponent(roomId)}/chat?after=${after}`);
+  return siteToolApi(`/rooms/${encodeURIComponent(roomId)}/chat?after=${after}`);
 }
 
 export async function readPublicChatHistory(
@@ -98,7 +100,7 @@ export async function readChatHistory(
 }
 
 export async function sendChat(roomId: string, message: string): Promise<ChatMessage> {
-  return api(`/rooms/${encodeURIComponent(roomId)}/chat`, {
+  return siteToolApi(`/rooms/${encodeURIComponent(roomId)}/chat`, {
     method: "POST",
     body: JSON.stringify({ message })
   });
@@ -138,13 +140,12 @@ export async function execComputer(
   durationMs: number;
   filesystemRevision: number;
 }> {
-  return api(
+  return siteToolApi(
     `/rooms/${encodeURIComponent(roomId)}/computer/exec`,
     {
       method: "POST",
       body: JSON.stringify({ command, cwd })
     },
-    true,
     EXEC_REQUEST_TIMEOUT_MS
   );
 }
@@ -284,6 +285,16 @@ async function api<T>(
     throw new ApiError(message, response.status);
   }
   return value as T;
+}
+
+function siteToolApi<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+): Promise<T> {
+  const headers = new Headers(init?.headers);
+  headers.set(AGENT_ACTIVITY_HEADER, AGENT_ACTIVITY_SITE_TOOL);
+  return api(path, { ...init, headers }, true, timeoutMs);
 }
 
 async function createSession(): Promise<SessionInfo> {

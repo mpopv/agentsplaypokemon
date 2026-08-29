@@ -132,9 +132,13 @@ export class GameRoomDO extends Container<Env> {
   async observe(roomId: string, agent: AgentIdentity): Promise<GameObservation> {
     this.recordMetric("observeRequests");
     this.identify(roomId);
-    this.touchPresence(agent);
     const window = await this.ensureVoteWindow();
     return this.buildObservation(roomId, window, agent.agentId, false);
+  }
+
+  markActive(roomId: string, agent: AgentIdentity): void {
+    this.identify(roomId);
+    this.touchPresence(agent);
   }
 
   spectate(roomId: string): GameObservation {
@@ -146,7 +150,6 @@ export class GameRoomDO extends Container<Env> {
   async vote(roomId: string, agent: AgentIdentity, input: GameInput): Promise<VoteReceipt> {
     this.recordMetric("votes");
     this.identify(roomId);
-    this.touchPresence(agent);
     const window = await this.ensureVoteWindow();
     if (window.ends_at <= Date.now()) {
       throw new InputError("this vote window is closed", 409);
@@ -197,10 +200,9 @@ export class GameRoomDO extends Container<Env> {
     };
   }
 
-  readChat(roomId: string, agent: AgentIdentity, after: number): ChatMessage[] {
+  readChat(roomId: string, after: number): ChatMessage[] {
     this.recordMetric("chatReads");
     this.identify(roomId);
-    this.touchPresence(agent);
     return this.readChatRows(after);
   }
 
@@ -224,14 +226,9 @@ export class GameRoomDO extends Container<Env> {
     return this.readChatRows(after);
   }
 
-  readChatHistory(
-    roomId: string,
-    agent: AgentIdentity | null,
-    before?: number
-  ): ChatHistoryPage {
+  readChatHistory(roomId: string, before?: number): ChatHistoryPage {
     this.recordMetric("chatReads");
     this.identify(roomId);
-    if (agent) this.touchPresence(agent);
     const rows = before === undefined
       ? this.ctx.storage.sql
           .exec<ChatRow>(
@@ -263,7 +260,6 @@ export class GameRoomDO extends Container<Env> {
 
   sendChat(roomId: string, agent: AgentIdentity, message: string): ChatMessage {
     this.identify(roomId);
-    this.touchPresence(agent);
     const last = this.ctx.storage.sql
       .exec<{ created_at: number }>(
         "SELECT created_at FROM chat_messages WHERE agent_id = ? ORDER BY sequence DESC LIMIT 1",
@@ -289,13 +285,8 @@ export class GameRoomDO extends Container<Env> {
     return chat;
   }
 
-  agentActivity(
-    roomId: string,
-    viewer: AgentIdentity | null,
-    agentId: string
-  ): GameAgentActivity {
+  agentActivity(roomId: string, agentId: string): GameAgentActivity {
     this.identify(roomId);
-    if (viewer) this.touchPresence(viewer);
     const summary = this.ctx.storage.sql
       .exec<{
         display_name: string;
@@ -595,7 +586,6 @@ export class GameRoomDO extends Container<Env> {
     const displayName = request.headers.get("x-agent-name");
     if (participant) {
       if (!agentId || !displayName) return new Response("unauthorized", { status: 401 });
-      this.touchPresence({ agentId, displayName });
     }
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -616,7 +606,6 @@ export class GameRoomDO extends Container<Env> {
     }
 
     this.identify(roomId);
-    if (participant && agentId && displayName) this.touchPresence({ agentId, displayName });
     const meta = this.readMeta();
     if (meta.mode !== "rom") {
       return new Response("live stream requires a ROM", { status: 409 });

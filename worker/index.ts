@@ -13,6 +13,7 @@ import type { RuntimeEnv } from "./lib/runtime-env";
 import {
   enforceSameOrigin,
   InputError,
+  isSiteToolActivity,
   parseAgentId,
   parseChatMessage,
   parseCommand,
@@ -90,14 +91,14 @@ app.get("/public/rooms/:roomId/chat/history", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const before = parseOptionalCursor(context.req.query("before"));
   return context.json(
-    await context.env.GAME_ROOMS.getByName(roomId).readChatHistory(roomId, null, before)
+    await context.env.GAME_ROOMS.getByName(roomId).readChatHistory(roomId, before)
   );
 });
 
 app.get("/public/rooms/:roomId/agents/:agentId", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const agentId = parseAgentId(context.req.param("agentId"));
-  return context.json(await readAgentProfile(context.env, roomId, agentId, null));
+  return context.json(await readAgentProfile(context.env, roomId, agentId));
 });
 
 app.get("/public/rooms/:roomId/game/frame", async (context) => {
@@ -211,8 +212,12 @@ app.use("/rooms/:roomId/*", async (context, next) => {
   if (session.roomId !== roomId) {
     throw new InputError("this session does not have access to the requested room", 403);
   }
-  context.set("agent", { agentId: session.agentId, displayName: session.displayName });
+  const agent = { agentId: session.agentId, displayName: session.displayName };
+  context.set("agent", agent);
   context.set("roomId", roomId);
+  if (isSiteToolActivity(context.req.raw)) {
+    await context.env.GAME_ROOMS.getByName(roomId).markActive(roomId, agent);
+  }
   await next();
 });
 
@@ -235,7 +240,7 @@ app.get("/rooms/:roomId/chat", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const after = parseCursor(context.req.query("after"));
   const game = context.env.GAME_ROOMS.getByName(roomId);
-  const messages = await game.readChat(roomId, context.get("agent"), after);
+  const messages = await game.readChat(roomId, after);
   return context.json({
     messages,
     cursor: messages.at(-1)?.sequence ?? after
@@ -246,7 +251,7 @@ app.get("/rooms/:roomId/chat/history", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const before = parseOptionalCursor(context.req.query("before"));
   const game = context.env.GAME_ROOMS.getByName(roomId);
-  return context.json(await game.readChatHistory(roomId, context.get("agent"), before));
+  return context.json(await game.readChatHistory(roomId, before));
 });
 
 app.post("/rooms/:roomId/chat", async (context) => {
@@ -261,9 +266,7 @@ app.post("/rooms/:roomId/chat", async (context) => {
 app.get("/rooms/:roomId/agents/:agentId", async (context) => {
   const roomId = parseRoomId(context.req.param("roomId"));
   const agentId = parseAgentId(context.req.param("agentId"));
-  return context.json(
-    await readAgentProfile(context.env, roomId, agentId, context.get("agent"))
-  );
+  return context.json(await readAgentProfile(context.env, roomId, agentId));
 });
 
 app.get("/rooms/:roomId/game/frame", async (context) => {
@@ -587,11 +590,10 @@ async function gameFrameResponse(env: RuntimeEnv, roomId: string): Promise<Respo
 async function readAgentProfile(
   env: RuntimeEnv,
   roomId: string,
-  agentId: string,
-  viewer: AgentIdentity | null
+  agentId: string
 ): Promise<AgentProfile> {
   const [gameActivity, computerActivity] = await Promise.all([
-    env.GAME_ROOMS.getByName(roomId).agentActivity(roomId, viewer, agentId),
+    env.GAME_ROOMS.getByName(roomId).agentActivity(roomId, agentId),
     env.SHARED_COMPUTERS.getByName(roomId).agentActivity(roomId, agentId)
   ]);
   const displayName = gameActivity.displayName ?? computerActivity.displayName;

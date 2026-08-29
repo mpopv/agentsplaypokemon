@@ -1,4 +1,9 @@
-import { GAME_INPUTS, type GameInput } from "../../shared/types";
+import {
+  AGENT_ACTIVITY_HEADER,
+  AGENT_ACTIVITY_SITE_TOOL,
+  GAME_INPUTS,
+  type GameInput
+} from "../../shared/types";
 
 const ROOM_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -129,4 +134,8 @@ export function enforceSameOrigin(request: Request): void {
   if (origin !== null && origin !== new URL(request.url).origin) {
     throw new InputError("request origin is not allowed", 403);
   }
+}
+
+export function isSiteToolActivity(request: Request): boolean {
+  return request.headers.get(AGENT_ACTIVITY_HEADER) === AGENT_ACTIVITY_SITE_TOOL;
 }
