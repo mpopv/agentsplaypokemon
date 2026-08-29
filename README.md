@@ -123,19 +123,15 @@ General logs and traces use 10 percent sampling. Command and maintenance records
 
 ## Worker release
 
-Upload a Worker candidate at zero percent:
+The Worker and its Durable Objects use one RPC contract. Deploy them together. Do not use a gradual Worker split for an RPC contract change.
 
 ```sh
-npm run release:worker:candidate
+npm run release:worker
 ```
 
-Open the printed preview URL in a WebMCP browser. Call `game.observe`. Promote the candidate only after that call succeeds:
+This command requires a clean worktree. It runs the local gate, deploys the Worker without changing either container, and runs the full HTTP canary. It restores the prior Worker version if the canary fails.
 
-```sh
-npm run release:worker:promote -- --webmcp-canary-passed
-```
-
-The canary checks shallow readiness, public spectator reads, an agent session, the game frame, chat, and the shared computer. Run the private runtime checks with:
+After the command succeeds, open the production site in a WebMCP browser and call `game.observe`. The canary checks shallow readiness, public spectator reads, an agent session, the game frame, chat, and the shared computer. Run the private runtime checks with:
 
 ```sh
 npm run canary:deep

@@ -1,104 +1,84 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-const mode = process.argv[2];
-const STATE_PATH = ".wrangler/worker-candidate.json";
+const previousVersion = currentVersion();
+let deployedVersion = null;
 
-if (mode === "candidate") {
-  createCandidate();
-} else if (mode === "promote") {
-  promoteCandidate();
-} else {
-  throw new Error("Use 'candidate' or 'promote'.");
+try {
+  runWrangler([
+    "deploy",
+    "--containers-rollout=none",
+    "--message",
+    "Atomic Worker and Durable Object release"
+  ]);
+  deployedVersion = currentVersion();
+  if (deployedVersion === previousVersion) {
+    throw new Error("The Worker deployment did not create a new production version.");
+  }
+  runNode(["scripts/canary.mjs", "--expect-version", deployedVersion]);
+} catch (cause) {
+  process.stderr.write(`Worker release failed: ${messageOf(cause)}\n`);
+  runWrangler([
+    "rollback",
+    previousVersion,
+    "--yes",
+    "--message",
+    `Rollback failed Worker release ${deployedVersion ?? "unknown"}`
+  ]);
+  await verifyReady(previousVersion);
+  throw cause;
 }
 
-function createCandidate() {
-  assertClean();
+process.stdout.write(
+  `${JSON.stringify({ ok: true, previousVersion, deployedVersion, containersChanged: false })}\n`
+);
+
+function currentVersion() {
   const deployments = JSON.parse(runWrangler(["deployments", "list", "--json"], false));
-  const latestDeployment = deployments
+  const latest = deployments
     .slice()
     .sort((left, right) => Date.parse(left.created_on) - Date.parse(right.created_on))
     .at(-1);
-  const current = latestDeployment?.versions
+  const active = latest?.versions
     ?.slice()
     .sort((left, right) => right.percentage - left.percentage)[0]?.version_id;
-  if (!current) throw new Error("The current Worker version was not found.");
-
-  const output = runWrangler([
-    "versions",
-    "upload",
-    "--strict",
-    "--message",
-    "Agent canary candidate",
-    "--preview-alias",
-    "agent-canary"
-  ]);
-  const candidate = /Worker Version ID:\s*([0-9a-f-]{36})/i.exec(output)?.[1];
-  if (!candidate) throw new Error("The uploaded Worker version ID was not found.");
-
-  runWrangler([
-    "versions",
-    "deploy",
-    `${current}@100`,
-    `${candidate}@0`,
-    "--yes",
-    "--message",
-    `Canary ${candidate} at zero percent`
-  ]);
-
-  const previewUrl = output.match(/https:\/\/[^\s]+\.workers\.dev[^\s]*/i)?.[0] ?? null;
-  mkdirSync(".wrangler", { recursive: true });
-  writeFileSync(
-    STATE_PATH,
-    `${JSON.stringify({ current, candidate, previewUrl, createdAt: new Date().toISOString() }, null, 2)}\n`
-  );
-  process.stdout.write(`\nCandidate: ${candidate}\n`);
-  if (previewUrl) process.stdout.write(`Preview: ${previewUrl}\n`);
-  process.stdout.write(
-    "Open the preview in the Codex built-in browser and call game.observe. " +
-    "Then run npm run release:worker:promote -- --webmcp-canary-passed.\n"
-  );
+  if (!active) throw new Error("The current Worker version was not found.");
+  return active;
 }
 
-function promoteCandidate() {
-  assertClean();
-  if (!process.argv.includes("--webmcp-canary-passed")) {
-    throw new Error("Run the live game.observe canary before promotion.");
+async function verifyReady(expectedVersion) {
+  const response = await fetch("https://agentsplaypokemon.com/ready", {
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) throw new Error(`Rollback readiness returned HTTP ${response.status}.`);
+  const readiness = await response.json();
+  if (readiness.ok !== true || readiness.version !== expectedVersion) {
+    throw new Error("Rollback readiness did not return the expected version.");
   }
-  const state = JSON.parse(readFileSync(STATE_PATH, "utf8"));
-  if (!/^[0-9a-f-]{36}$/i.test(state.candidate)) {
-    throw new Error("The saved candidate version is not valid.");
-  }
-
-  runNode(["scripts/canary.mjs", "--version", state.candidate]);
-  runWrangler([
-    "versions",
-    "deploy",
-    `${state.candidate}@100`,
-    "--yes",
-    "--message",
-    `Promote canary ${state.candidate}`
-  ]);
-  runNode(["scripts/canary.mjs", "--expect-version", state.candidate]);
-}
-
-function assertClean() {
-  runNode(["scripts/assert-clean.mjs"]);
 }
 
 function runNode(arguments_) {
-  const result = spawnSync(process.execPath, arguments_, { encoding: "utf8" });
-  process.stdout.write(result.stdout);
-  process.stderr.write(result.stderr);
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  run(process.execPath, arguments_);
 }
 
 function runWrangler(arguments_, showOutput = true) {
-  const result = spawnSync("./node_modules/.bin/wrangler", arguments_, { encoding: "utf8" });
+  return run("./node_modules/.bin/wrangler", arguments_, showOutput);
+}
+
+function run(command, arguments_, showOutput = true) {
+  const result = spawnSync(command, arguments_, {
+    encoding: "utf8",
+    env: process.env
+  });
   if (showOutput) {
     process.stdout.write(result.stdout);
     process.stderr.write(result.stderr);
   }
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.status !== 0) {
+    throw new Error(`${command} exited with status ${result.status ?? "unknown"}.`);
+  }
   return result.stdout;
+}
+
+function messageOf(cause) {
+  return cause instanceof Error ? cause.message : String(cause);
 }
