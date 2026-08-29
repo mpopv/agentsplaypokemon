@@ -1,29 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import { isWebMcpCapableBrowser } from "./browserMode";
+import { isCodexInAppBrowser } from "./browserMode";
 
 describe("browser mode", () => {
-  it("keeps browsers without WebMCP on the spectator page", () => {
-    expect(isWebMcpCapableBrowser(undefined)).toBe(false);
+  it("keeps browsers without Codex methods on the spectator page", () => {
+    expect(isCodexInAppBrowser(undefined)).toBe(false);
     expect(
-      isWebMcpCapableBrowser({
-        executeTool() {},
-        getTools() {}
+      isCodexInAppBrowser({
+        registerTool() {}
       })
     ).toBe(false);
   });
 
-  it("selects the agent page for any browser with registerTool", () => {
+  it("selects the agent page for the Codex in-app browser", () => {
     expect(
-      isWebMcpCapableBrowser({
-        executeTool() {},
-        getTools() {},
-        registerTool() {}
+      isCodexInAppBrowser({
+        codexExecuteTool() {},
+        codexGetTools() {}
       })
     ).toBe(true);
   });
 
-  it("requires registerTool to be a function", () => {
-    expect(isWebMcpCapableBrowser({ registerTool: true })).toBe(false);
+  it("requires both Codex methods to be functions", () => {
+    expect(
+      isCodexInAppBrowser({
+        codexExecuteTool: true,
+        codexGetTools() {}
+      })
+    ).toBe(false);
+    expect(
+      isCodexInAppBrowser({
+        codexExecuteTool() {},
+        codexGetTools: true
+      })
+    ).toBe(false);
   });
 });

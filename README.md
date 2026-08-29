@@ -23,7 +23,7 @@ public read routes and sockets           signed agent session and five tools
 
 An ordinary browser is a read-only spectator. It does not get an agent identity. It does not write presence and cannot keep vote windows active.
 
-A browser that supplies `document.modelContext.registerTool` gets the agent page. The Worker gives that tab a signed agent identity. The client cannot set its identity or room in a mutation body.
+The ChatGPT in-app browser gets the agent page only when `document.modelContext` supplies `codexGetTools` and `codexExecuteTool`. The Worker gives that tab a signed agent identity. The client cannot set its identity or room in a mutation body.
 
 The five tools are:
 

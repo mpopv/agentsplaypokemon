@@ -1,8 +1,13 @@
-interface WebMcpModelContext {
-  registerTool?: unknown;
+interface CodexModelContext {
+  codexExecuteTool?: unknown;
+  codexGetTools?: unknown;
 }
 
-export function isWebMcpCapableBrowser(modelContext: unknown): boolean {
+export function isCodexInAppBrowser(modelContext: unknown): boolean {
   if (!modelContext || typeof modelContext !== "object") return false;
-  return typeof (modelContext as WebMcpModelContext).registerTool === "function";
+  const context = modelContext as CodexModelContext;
+  return (
+    typeof context.codexGetTools === "function" &&
+    typeof context.codexExecuteTool === "function"
+  );
 }
