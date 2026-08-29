@@ -1,13 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ChatMessage, GameObservation } from "../shared/types";
-import { ApiError, observeGame, readChat, readChatHistory, readGameFrame } from "./api";
+import {
+  ApiError,
+  observePublicGame,
+  readPublicChat,
+  readPublicChatHistory,
+  readPublicGameFrame
+} from "./api";
 import { useSession } from "./hooks/useSession";
 import { mergeBySequence } from "./lib/sequence";
 import { registerRoomTools, type WebMcpStatus } from "./webmcp";
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_VISIBLE_CHAT_MESSAGES = 30;
+
+export function pollAgentRoom(roomId: string, after: number | null) {
+  return Promise.allSettled([
+    observePublicGame(roomId),
+    after === null ? readPublicChatHistory(roomId) : readPublicChat(roomId, after)
+  ]);
+}
 
 export function useAgentRoomData() {
   const { session, sessionError, sessionLoading, dismissSessionError } = useSession();
@@ -29,11 +42,10 @@ export function useAgentRoomData() {
     if (refreshRequest.current) return refreshRequest.current;
 
     const request = (async () => {
-      const gameRequest = observeGame(session.roomId);
-      const chatRequest = chatReady.current
-        ? readChat(session.roomId, chatCursor.current)
-        : readChatHistory(session.roomId);
-      const [gameResult, chatResult] = await Promise.allSettled([gameRequest, chatRequest]);
+      const [gameResult, chatResult] = await pollAgentRoom(
+        session.roomId,
+        chatReady.current ? chatCursor.current : null
+      );
       if (!active.current) return;
       const failures: unknown[] = [];
       let updated = false;
@@ -43,7 +55,7 @@ export function useAgentRoomData() {
         updated = true;
         if (frameRevision.current !== gameResult.value.frameRevision) {
           try {
-            const blob = await readGameFrame(gameResult.value.frameUrl);
+            const blob = await readPublicGameFrame(gameResult.value.frameUrl);
             if (!active.current) return;
             const nextUrl = URL.createObjectURL(blob);
             const previousUrl = frameUrl.current;
